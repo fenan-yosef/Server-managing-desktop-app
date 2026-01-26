@@ -723,7 +723,8 @@ class MainWindow(QMainWindow):
 
     # Connection helpers
     def _browse_key(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Select SSH Key")
+        home_dir = str(Path.home())
+        path, _ = QFileDialog.getOpenFileName(self, "Select SSH Key", home_dir)
         if path:
             self.key_input.setText(path)
 
