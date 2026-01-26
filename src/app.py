@@ -3,13 +3,14 @@ import posixpath
 import shutil
 import sqlite3
 import subprocess
+import threading
 import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional
 
-from PyQt6.QtCore import QObject, QPropertyAnimation, QThread, pyqtSignal
+from PyQt6.QtCore import QObject, QPropertyAnimation, QThread, Qt, pyqtSignal
 from PyQt6.QtWidgets import QGraphicsOpacityEffect
 from PyQt6.QtWidgets import (
     QApplication,
@@ -208,6 +209,9 @@ class BackupWorker(QObject):
         self.job = job
         self.username = username
         self.host = host
+        self._pause_event = threading.Event()
+        self._cancel_event = threading.Event()
+        self._process: Optional[subprocess.Popen[str]] = None
 
     def run(self) -> None:
         try:
@@ -219,6 +223,8 @@ class BackupWorker(QObject):
             self._update_status("running", "clean-staging", 0, "Preparing staging")
             self._clean_dir(staging)
             staging.mkdir(parents=True, exist_ok=True)
+            self._wait_if_paused()
+            self._raise_if_cancelled()
 
             if self.job.mode == "rsync":
                 self._update_status("running", "rsync", 0, "Running rsync")
@@ -227,17 +233,36 @@ class BackupWorker(QObject):
                 self._update_status("running", "tar", 0, "Creating remote tar")
                 self._run_tar(staging)
 
+            self._wait_if_paused()
+            self._raise_if_cancelled()
             self._update_status("running", "verify", 95, "Verifying staging")
             self._verify(staging)
 
+            self._wait_if_paused()
+            self._raise_if_cancelled()
             self._update_status("running", "atomic-switch", 98, "Atomic switch")
             self._atomic_switch(staging, current, previous)
 
             self._update_status("completed", "done", 100, "Backup completed")
             self.finished.emit("Backup completed")
         except Exception as exc:  # noqa: BLE001
-            self._update_status("failed", self.job.phase, self.job.progress, str(exc))
+            status = "aborted" if str(exc) == "Cancelled" else "failed"
+            self._update_status(status, self.job.phase, self.job.progress, str(exc))
             self.error.emit(str(exc))
+
+    def request_pause(self, paused: bool) -> None:
+        if paused:
+            self._pause_event.set()
+        else:
+            self._pause_event.clear()
+
+    def request_cancel(self) -> None:
+        self._cancel_event.set()
+        if self._process and self._process.poll() is None:
+            try:
+                self._process.terminate()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _update_status(self, status: str, phase: str, progress: int, message: str) -> None:
         self.job.status = status
@@ -264,23 +289,24 @@ class BackupWorker(QObject):
             remote,
             str(staging) + os.sep,
         ]
-        process = subprocess.Popen(
+        self._process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
         )
-        if not process.stdout:
+        if not self._process.stdout:
             raise RuntimeError("Unable to read rsync output")
-        for line in process.stdout:
+        for line in self._process.stdout:
             line = line.strip()
             if line:
                 self.log.emit(line)
             percent = self._parse_percent(line)
             if percent is not None:
                 self._update_status("running", "rsync", percent, "Syncing")
-        code = process.wait()
+            self._raise_if_cancelled()
+        code = self._process.wait()
         if code != 0:
             raise RuntimeError(f"rsync failed with code {code}")
 
@@ -320,6 +346,8 @@ class BackupWorker(QObject):
             with local_path.open("ab") as dst:
                 transferred = local_size
                 while transferred < remote_size:
+                    self._wait_if_paused()
+                    self._raise_if_cancelled()
                     chunk = src.read(1024 * 256)
                     if not chunk:
                         break
@@ -347,6 +375,16 @@ class BackupWorker(QObject):
 
     def _ensure_paths(self) -> None:
         Path(self.job.target_root).mkdir(parents=True, exist_ok=True)
+
+    def _wait_if_paused(self) -> None:
+        while self._pause_event.is_set():
+            time.sleep(0.2)
+            if self._cancel_event.is_set():
+                break
+
+    def _raise_if_cancelled(self) -> None:
+        if self._cancel_event.is_set():
+            raise RuntimeError("Cancelled")
 
 
 class ExplorerModel:
@@ -414,6 +452,9 @@ class MainWindow(QMainWindow):
         self.store = JobStore(DB_PATH)
         self.explorer: Optional[ExplorerModel] = None
         self.job_active = False
+        self._threads: list[QThread] = []
+        self._current_worker: Optional[BackupWorker] = None
+        self._current_thread: Optional[QThread] = None
 
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
@@ -489,19 +530,19 @@ class MainWindow(QMainWindow):
 
         ops_row = QHBoxLayout()
         self.mkdir_btn = QPushButton("New Folder")
-        self.mkdir_btn.setIcon(qta.icon("fa.folder-plus"))
+        self.mkdir_btn.setIcon(qta.icon("fa5s.folder-plus"))
         self.mkdir_btn.clicked.connect(self._explorer_mkdir)
         self.rename_btn = QPushButton("Rename")
-        self.rename_btn.setIcon(qta.icon("fa.i-cursor"))
+        self.rename_btn.setIcon(qta.icon("fa5s.i-cursor"))
         self.rename_btn.clicked.connect(self._explorer_rename)
         self.delete_btn = QPushButton("Delete")
-        self.delete_btn.setIcon(qta.icon("fa.trash"))
+        self.delete_btn.setIcon(qta.icon("fa5s.trash"))
         self.delete_btn.clicked.connect(self._explorer_delete)
         self.upload_btn = QPushButton("Upload")
-        self.upload_btn.setIcon(qta.icon("fa.upload"))
+        self.upload_btn.setIcon(qta.icon("fa5s.upload"))
         self.upload_btn.clicked.connect(self._explorer_upload)
         self.download_btn = QPushButton("Download")
-        self.download_btn.setIcon(qta.icon("fa.download"))
+        self.download_btn.setIcon(qta.icon("fa5s.download"))
         self.download_btn.clicked.connect(self._explorer_download)
 
         ops_row.addWidget(self.mkdir_btn)
@@ -539,11 +580,11 @@ class MainWindow(QMainWindow):
         for name, is_dir, size in entries:
             label = f"[DIR] {name}" if is_dir else f"{name} ({size} bytes)"
             item = QListWidgetItem(label)
-            item.setData(1, (name, is_dir))
+            item.setData(Qt.ItemDataRole.UserRole, (name, is_dir))
             if is_dir:
-                item.setIcon(qta.icon("fa.folder"))
+                item.setIcon(qta.icon("fa5s.folder"))
             else:
-                item.setIcon(qta.icon("fa.file"))
+                item.setIcon(qta.icon("fa5s.file"))
             self.listing.addItem(item)
         self._animate_list()
 
@@ -554,7 +595,7 @@ class MainWindow(QMainWindow):
         self._explorer_refresh()
 
     def _explorer_double_click(self, item: QListWidgetItem) -> None:
-        data = item.data(1)
+        data = item.data(Qt.ItemDataRole.UserRole)
         if not data:
             return
         name, is_dir = data
@@ -587,7 +628,7 @@ class MainWindow(QMainWindow):
         item = self.listing.currentItem()
         if not item:
             return
-        name, _ = item.data(1)
+        name, _ = item.data(Qt.ItemDataRole.UserRole)
         base = self._normalize_remote_path(self.path_input.text()).rstrip("/")
         old_path = posixpath.join(base if base else "/", name)
         new_name, ok = QFileDialog.getSaveFileName(self, "New name", name)
@@ -607,7 +648,7 @@ class MainWindow(QMainWindow):
         item = self.listing.currentItem()
         if not item:
             return
-        name, _ = item.data(1)
+        name, _ = item.data(Qt.ItemDataRole.UserRole)
         base = self._normalize_remote_path(self.path_input.text()).rstrip("/")
         target = posixpath.join(base if base else "/", name)
         if QMessageBox.question(self, "Delete", f"Delete {target}?") != QMessageBox.StandardButton.Yes:
@@ -639,7 +680,7 @@ class MainWindow(QMainWindow):
         item = self.listing.currentItem()
         if not item:
             return
-        name, is_dir = item.data(1)
+        name, is_dir = item.data(Qt.ItemDataRole.UserRole)
         if is_dir:
             QMessageBox.information(self, "Download", "Download supports files only.")
             return
@@ -657,7 +698,7 @@ class MainWindow(QMainWindow):
         item = self.listing.currentItem()
         if not item:
             return
-        name, is_dir = item.data(1)
+        name, is_dir = item.data(Qt.ItemDataRole.UserRole)
         base = self._normalize_remote_path(self.path_input.text()).rstrip("/")
         remote_path = posixpath.join(base if base else "/", name)
         remote_path = self._normalize_remote_path(remote_path)
@@ -696,9 +737,21 @@ class MainWindow(QMainWindow):
         self.backup_log.setReadOnly(True)
         start_btn = QPushButton("Start Backup")
         start_btn.clicked.connect(self._start_backup)
+        self.pause_btn = QPushButton("Pause")
+        self.pause_btn.clicked.connect(self._pause_backup)
+        self.resume_btn = QPushButton("Resume")
+        self.resume_btn.clicked.connect(self._resume_backup)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self._cancel_backup)
+        self.pause_btn.setEnabled(False)
+        self.resume_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(False)
 
         layout.addLayout(form)
         layout.addWidget(start_btn)
+        layout.addWidget(self.pause_btn)
+        layout.addWidget(self.resume_btn)
+        layout.addWidget(self.cancel_btn)
         layout.addWidget(self.backup_progress)
         layout.addWidget(self.backup_log)
 
@@ -773,8 +826,9 @@ class MainWindow(QMainWindow):
             return
         mode = "rsync" if self.mode_input.currentRow() == 0 else "tar"
         if mode == "rsync" and not shutil.which("rsync"):
-            QMessageBox.warning(self, "rsync missing", "rsync not found in PATH; choose tar.gz mode or install rsync.")
-            return
+            QMessageBox.information(self, "rsync missing", "rsync not found in PATH. Switching to tar.gz mode.")
+            mode = "tar"
+            self.mode_input.setCurrentRow(1)
 
         job_id = f"backup_{int(time.time())}_{uuid.uuid4().hex[:6]}"
         job = Job(
@@ -812,22 +866,63 @@ class MainWindow(QMainWindow):
         worker.error.connect(thread.quit)
         worker.error.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda: self._threads.remove(thread))
         self.job_active = True
         self._set_explorer_enabled(False)
+        self._current_worker = worker
+        self._current_thread = thread
+        self.pause_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(True)
+        self.resume_btn.setEnabled(False)
+        self._threads.append(thread)
         thread.start()
 
     def _on_finished(self, message: str) -> None:
         self.job_active = False
         self._set_explorer_enabled(True)
+        self.pause_btn.setEnabled(False)
+        self.resume_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(False)
+        self._current_worker = None
+        self._current_thread = None
         self.backup_log.append(message)
         self._refresh_jobs()
 
     def _on_error(self, message: str) -> None:
         self.job_active = False
         self._set_explorer_enabled(True)
+        self.pause_btn.setEnabled(False)
+        self.resume_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(False)
+        self._current_worker = None
+        self._current_thread = None
         QMessageBox.critical(self, "Error", message)
         self.backup_log.append(message)
         self._refresh_jobs()
+
+    def _pause_backup(self) -> None:
+        if not self._current_worker:
+            return
+        if self._current_worker.job.mode == "rsync":
+            QMessageBox.information(self, "Pause", "Pause is not supported for rsync. Use Cancel if needed.")
+            return
+        self._current_worker.request_pause(True)
+        self.pause_btn.setEnabled(False)
+        self.resume_btn.setEnabled(True)
+
+    def _resume_backup(self) -> None:
+        if not self._current_worker:
+            return
+        self._current_worker.request_pause(False)
+        self.pause_btn.setEnabled(True)
+        self.resume_btn.setEnabled(False)
+
+    def _cancel_backup(self) -> None:
+        if not self._current_worker:
+            return
+        if QMessageBox.question(self, "Cancel", "Cancel the running backup?") != QMessageBox.StandardButton.Yes:
+            return
+        self._current_worker.request_cancel()
 
     def _refresh_jobs(self) -> None:
         self.jobs_list.clear()
