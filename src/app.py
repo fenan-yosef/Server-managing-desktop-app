@@ -132,12 +132,6 @@ class JobStore:
             for row in rows
         ]
 
-    def delete(self, job_id: str) -> None:
-        conn = sqlite3.connect(self.db_path)
-        conn.execute("DELETE FROM jobs WHERE job_id=?", (job_id,))
-        conn.commit()
-        conn.close()
-
     def get(self, job_id: str) -> Optional[Job]:
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
@@ -160,6 +154,12 @@ class JobStore:
             message=row[7],
             mode=row[8],
         )
+
+    def delete(self, job_id: str) -> None:
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("DELETE FROM jobs WHERE job_id=?", (job_id,))
+        conn.commit()
+        conn.close()
 
 
 class SSHManager:
@@ -193,6 +193,27 @@ class SSHManager:
         err = stderr.read().decode(errors="ignore")
         code = stdout.channel.recv_exit_status()
         return out, err, code
+
+
+class ConnectWorker(QObject):
+    success = pyqtSignal()
+    error = pyqtSignal(str)
+
+    def __init__(self, ssh: SSHManager, host: str, port: int, user: str, key_path: Optional[str], password: Optional[str]) -> None:
+        super().__init__()
+        self.ssh = ssh
+        self.host = host
+        self.port = port
+        self.user = user
+        self.key_path = key_path
+        self.password = password
+
+    def run(self) -> None:
+        try:
+            self.ssh.connect(self.host, self.port, self.user, self.key_path, self.password)
+            self.success.emit()
+        except Exception as exc:  # noqa: BLE001
+            self.error.emit(str(exc))
 
 
 class BackupWorker(QObject):
@@ -393,52 +414,6 @@ class BackupWorker(QObject):
             raise RuntimeError("Cancelled")
 
 
-class ConnectionWorker(QObject):
-    finished = pyqtSignal()
-    error = pyqtSignal(str)
-
-    def __init__(
-        self,
-        ssh: SSHManager,
-        host: str,
-        port: int,
-        user: str,
-        key_path: Optional[str],
-        password: Optional[str],
-    ) -> None:
-        super().__init__()
-        self.ssh = ssh
-        self.host = host
-        self.port = port
-        self.user = user
-        self.key_path = key_path
-        self.password = password
-
-    def run(self) -> None:
-        try:
-            self.ssh.connect(self.host, self.port, self.user, self.key_path, self.password)
-            self.finished.emit()
-        except Exception as exc:  # noqa: BLE001
-            self.error.emit(str(exc))
-
-
-class ListingWorker(QObject):
-    finished = pyqtSignal(list)
-    error = pyqtSignal(str)
-
-    def __init__(self, explorer: "ExplorerModel", path: str) -> None:
-        super().__init__()
-        self.explorer = explorer
-        self.path = path
-
-    def run(self) -> None:
-        try:
-            entries = self.explorer.list_dir(self.path)
-            self.finished.emit(entries)
-        except Exception as exc:  # noqa: BLE001
-            self.error.emit(str(exc))
-
-
 class ExplorerModel:
     def __init__(self, ssh: SSHManager) -> None:
         self.ssh = ssh
@@ -517,6 +492,8 @@ class MainWindow(QMainWindow):
         self._build_jobs_tab()
         self._refresh_jobs()
         self._set_explorer_enabled(False)
+        self._login_thread: Optional[QThread] = None
+        self._login_worker: Optional[ConnectWorker] = None
 
     # Login
     def _build_login_tab(self) -> None:
@@ -551,10 +528,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.password_input, 4, 1)
         layout.addWidget(connect_btn, 5, 0)
         layout.addWidget(disconnect_btn, 5, 1)
-        
-        self.login_loading = QLabel("")
-        layout.addWidget(self.status_label, 6, 0)
-        layout.addWidget(self.login_loading, 6, 1)
+        layout.addWidget(self.status_label, 6, 0, 1, 2)
 
         tab.setLayout(layout)
         self.tabs.addTab(tab, "Login")
@@ -566,7 +540,7 @@ class MainWindow(QMainWindow):
 
         path_row = QHBoxLayout()
         self.path_input = QLineEdit("/")
-        self.path_input.returnPressed.connect(self._explorer_refresh)
+        self.path_input.returnPressed.connect(self._explorer_go_path)
         refresh_btn = QPushButton("Refresh")
         refresh_btn.clicked.connect(self._explorer_refresh)
         up_btn = QPushButton("Up")
@@ -574,23 +548,17 @@ class MainWindow(QMainWindow):
         use_btn = QPushButton("Use as Source")
         use_btn.clicked.connect(self._use_selection_for_backup)
 
-        self.explorer_loading = QLabel()
-        self.explorer_loading.setFixedSize(24, 24)
-        
-        # We will set the movie/animation later or just use text for now to ensure it works
-        # Actually let's use a simple progress bar or just text that says "Loading..." if icons are tricky
-        # But user asked for animation.
-        
         path_row.addWidget(QLabel("Path"))
         path_row.addWidget(self.path_input)
         path_row.addWidget(refresh_btn)
         path_row.addWidget(up_btn)
         path_row.addWidget(use_btn)
-        path_row.addWidget(self.explorer_loading)
 
         self.listing = QListWidget()
         self.listing.setUniformItemSizes(True)
         self.listing.itemDoubleClicked.connect(self._explorer_double_click)
+
+        self.explorer_status = QLabel("")
 
         ops_row = QHBoxLayout()
         self.mkdir_btn = QPushButton("New Folder")
@@ -616,6 +584,7 @@ class MainWindow(QMainWindow):
         ops_row.addWidget(self.download_btn)
 
         layout.addLayout(path_row)
+        layout.addWidget(self.explorer_status)
         layout.addWidget(self.listing)
         layout.addLayout(ops_row)
         tab.setLayout(layout)
@@ -629,36 +598,20 @@ class MainWindow(QMainWindow):
     def _set_explorer_enabled(self, enabled: bool) -> None:
         for btn in [self.mkdir_btn, self.rename_btn, self.delete_btn, self.upload_btn, self.download_btn, self.listing]:
             btn.setEnabled(enabled)
+        self.path_input.setReadOnly(not enabled)
 
     def _explorer_refresh(self) -> None:
         if not self.explorer:
             return
+        self._set_loading(True)
         normalized = self._normalize_remote_path(self.path_input.text())
         self.path_input.setText(normalized)
-        
-        self.listing.clear()
-        self.explorer_loading.setText("Loading...")
-        self.listing.setEnabled(False)
-
-        worker = ListingWorker(self.explorer, normalized)
-        thread = QThread()
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.finished.connect(self._on_list_finished)
-        worker.error.connect(self._on_list_error)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        worker.error.connect(thread.quit)
-        worker.error.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(lambda: self._threads.remove(thread))
-        
-        self._threads.append(thread)
-        thread.start()
-
-    def _on_list_finished(self, entries: list) -> None:
-        self.explorer_loading.setText("")
-        self.listing.setEnabled(True)
+        try:
+            entries = self.explorer.list_dir(normalized)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "List failed", str(exc))
+            self._set_loading(False)
+            return
         self.listing.clear()
         for name, is_dir, size in entries:
             label = f"[DIR] {name}" if is_dir else f"{name} ({size} bytes)"
@@ -670,16 +623,16 @@ class MainWindow(QMainWindow):
                 item.setIcon(qta.icon("fa5s.file"))
             self.listing.addItem(item)
         self._animate_list()
-
-    def _on_list_error(self, message: str) -> None:
-        self.explorer_loading.setText("")
-        self.listing.setEnabled(True)
-        QMessageBox.critical(self, "List failed", message)
+        self._set_loading(False)
 
     def _explorer_up(self) -> None:
         path = self._normalize_remote_path(self.path_input.text())
         new_path = posixpath.dirname(path.rstrip("/")) or "/"
         self.path_input.setText(new_path)
+        self._explorer_refresh()
+
+    def _explorer_go_path(self) -> None:
+        # navigate to typed path on Enter
         self._explorer_refresh()
 
     def _explorer_double_click(self, item: QListWidgetItem) -> None:
@@ -853,13 +806,13 @@ class MainWindow(QMainWindow):
         self.jobs_list = QListWidget()
         resume_btn = QPushButton("Resume Selected")
         resume_btn.clicked.connect(self._resume_selected)
-        delete_btn = QPushButton("Delete Job")
-        delete_btn.clicked.connect(self._delete_job)
         refresh_btn = QPushButton("Refresh")
         refresh_btn.clicked.connect(self._refresh_jobs)
 
         layout.addWidget(self.jobs_list)
         layout.addWidget(resume_btn)
+        delete_btn = QPushButton("Delete Selected")
+        delete_btn.clicked.connect(self._delete_selected_job)
         layout.addWidget(delete_btn)
         layout.addWidget(refresh_btn)
         tab.setLayout(layout)
@@ -886,44 +839,29 @@ class MainWindow(QMainWindow):
         if not host or not user:
             QMessageBox.warning(self, "Missing", "Host and username are required.")
             return
-        
         self.status_label.setText("Connecting...")
-        self.login_loading.setText("Loading...")
-        
-        worker = ConnectionWorker(self.ssh, host, port, user, key_path, password)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        connect_btn = self.sender()
+        if isinstance(connect_btn, QPushButton):
+            connect_btn.setEnabled(False)
+        worker = ConnectWorker(self.ssh, host, port, user, key_path, password)
         thread = QThread()
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.finished.connect(self._on_connect_finished)
-        worker.error.connect(self._on_connect_error)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        worker.error.connect(thread.quit)
-        worker.error.connect(worker.deleteLater)
+        worker.success.connect(lambda: self._on_connect_success(connect_btn, thread, worker))
+        worker.error.connect(lambda msg: self._on_connect_error(msg, connect_btn, thread, worker))
         thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(lambda: self._threads.remove(thread))
-        
-        self._threads.append(thread)
+        self._login_thread = thread
+        self._login_worker = worker
         thread.start()
-
-    def _on_connect_finished(self) -> None:
-        self.login_loading.setText("")
-        self.status_label.setText("Connected")
-        self.explorer = ExplorerModel(self.ssh)
-        self.path_input.setText("/")
-        self._set_explorer_enabled(True)
-        self._explorer_refresh()
-
-    def _on_connect_error(self, message: str) -> None:
-        self.login_loading.setText("")
-        self.status_label.setText("Disconnected")
-        QMessageBox.critical(self, "Connection failed", message)
 
     def _disconnect(self) -> None:
         self.ssh.disconnect()
         self.status_label.setText("Disconnected")
         self._set_explorer_enabled(False)
         self.path_input.setText("/")
+        self._login_thread = None
+        self._login_worker = None
 
     # Backup workflow
     def _start_backup(self) -> None:
@@ -1002,6 +940,31 @@ class MainWindow(QMainWindow):
         self.backup_log.append(message)
         self._refresh_jobs()
 
+    def _on_connect_success(self, button: Optional[QPushButton], thread: QThread, worker: ConnectWorker) -> None:
+        QApplication.restoreOverrideCursor()
+        if button:
+            button.setEnabled(True)
+        self.status_label.setText("Connected")
+        self.explorer = ExplorerModel(self.ssh)
+        self.path_input.setText("/")
+        self._set_explorer_enabled(True)
+        self._explorer_refresh()
+        worker.deleteLater()
+        thread.quit()
+        self._login_thread = None
+        self._login_worker = None
+
+    def _on_connect_error(self, message: str, button: Optional[QPushButton], thread: QThread, worker: ConnectWorker) -> None:
+        QApplication.restoreOverrideCursor()
+        if button:
+            button.setEnabled(True)
+        self.status_label.setText("Disconnected")
+        QMessageBox.critical(self, "Connection failed", message)
+        worker.deleteLater()
+        thread.quit()
+        self._login_thread = None
+        self._login_worker = None
+
     def _on_error(self, message: str) -> None:
         self.job_active = False
         self._set_explorer_enabled(True)
@@ -1012,6 +975,22 @@ class MainWindow(QMainWindow):
         self._current_thread = None
         QMessageBox.critical(self, "Error", message)
         self.backup_log.append(message)
+        self._refresh_jobs()
+
+    def _delete_selected_job(self) -> None:
+        item = self.jobs_list.currentItem()
+        if not item:
+            return
+        job_id = item.text().split(" | ")[0]
+        job = self.store.get(job_id)
+        if not job:
+            return
+        if job.status == "running" and self.job_active:
+            QMessageBox.information(self, "Busy", "Cancel the running job instead.")
+            return
+        if QMessageBox.question(self, "Delete job", f"Delete job {job_id}? This removes it from history.") != QMessageBox.StandardButton.Yes:
+            return
+        self.store.delete(job_id)
         self._refresh_jobs()
 
     def _pause_backup(self) -> None:
@@ -1067,23 +1046,6 @@ class MainWindow(QMainWindow):
         self.mode_input.setCurrentRow(0 if job.mode == "rsync" else 1)
         self._start_backup()
 
-    def _delete_job(self) -> None:
-        item = self.jobs_list.currentItem()
-        if not item:
-            return
-        job_id = item.text().split(" | ")[0]
-        if QMessageBox.question(self, "Delete", f"Delete job {job_id}?") != QMessageBox.StandardButton.Yes:
-            return
-        # If running, try to cancel first?
-        # For now, just delete from store (force kill if local thread?)
-        # Since we don't have a map from job_id to worker, we assume user knows what they are doing
-        # or we could check if it matches current worker
-        if self._current_worker and self._current_worker.job.job_id == job_id:
-            QMessageBox.warning(self, "Running", "Stop the running job first.")
-            return
-        self.store.delete(job_id)
-        self._refresh_jobs()
-
     def _normalize_remote_path(self, raw_path: str) -> str:
         path = (raw_path or "/").strip()
         path = path.replace("\\", "/")
@@ -1098,6 +1060,14 @@ class MainWindow(QMainWindow):
         self.list_anim.setStartValue(0.0)
         self.list_anim.setEndValue(1.0)
         self.list_anim.start()
+
+    def _set_loading(self, loading: bool) -> None:
+        if loading:
+            self.explorer_status.setText("Loading...")
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        else:
+            self.explorer_status.setText("")
+            QApplication.restoreOverrideCursor()
 
 
 def main() -> None:
