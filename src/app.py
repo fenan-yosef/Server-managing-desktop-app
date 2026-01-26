@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Iterable, List, Optional
 
 from PyQt6.QtCore import QObject, QPropertyAnimation, QThread, Qt, pyqtSignal
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QGraphicsOpacityEffect
 from PyQt6.QtWidgets import (
     QApplication,
@@ -36,6 +37,8 @@ import qtawesome as qta
 
 BACKUP_ROOT = Path("backups").resolve()
 DB_PATH = Path("app.db").resolve()
+ASSETS_DIR = Path("assets")
+APP_ICON_PNG = ASSETS_DIR / "icon-b.png"
 
 
 @dataclass
@@ -1071,8 +1074,35 @@ class MainWindow(QMainWindow):
 
 
 def main() -> None:
+    # On Windows set an explicit AppUserModelID so the taskbar associates the
+    # running process with the exe's icon and jump list. Do this before creating
+    # any windows.
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            appid = "com.server.managing.backup"
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(appid)
+        except Exception:
+            pass
+
     app = QApplication([])
+    # Set application icon from assets/icon-b.png when available
+    try:
+        if APP_ICON_PNG.exists():
+            app_icon = QIcon(str(APP_ICON_PNG))
+            app.setWindowIcon(app_icon)
+    except Exception:
+        pass
+
     window = MainWindow()
+    # also set window icon explicitly
+    try:
+        if APP_ICON_PNG.exists():
+            window.setWindowIcon(QIcon(str(APP_ICON_PNG)))
+    except Exception:
+        pass
+
     window.resize(1000, 700)
     window.show()
     app.exec()
