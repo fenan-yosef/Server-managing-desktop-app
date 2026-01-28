@@ -147,6 +147,24 @@ class JSONSocketHandler(threading.Thread):
                                 self.send_json({"id": req_id, "error": str(e)})
                         else:
                             self.send_json({"id": req_id, "error": "not connected"})
+                    elif cmd == "start_backup":
+                        remote_path = pget("remote_path")
+                        local_path = pget("local_path")
+                        mode = pget("mode", "rsync")
+                        if explorer:
+                            try:
+                                # If ExplorerModel exposes a higher-level backup API, use it.
+                                if hasattr(explorer, 'start_backup'):
+                                    explorer.start_backup(remote_path, Path(local_path), mode=mode)
+                                    self.send_json({"id": req_id, "result": "ok"})
+                                else:
+                                    # Fallback to download (some implementations treat download as recursive)
+                                    explorer.download(remote_path, Path(local_path))
+                                    self.send_json({"id": req_id, "result": "ok"})
+                            except Exception as e:
+                                self.send_json({"id": req_id, "error": str(e)})
+                        else:
+                            self.send_json({"id": req_id, "error": "not connected"})
                     elif cmd == "read_file":
                         remote_path = pget("remote_path")
                         if explorer:

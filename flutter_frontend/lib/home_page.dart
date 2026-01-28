@@ -396,7 +396,103 @@ class _HomePageState extends State<HomePage> {
     final local = _localController.text;
     final mode = _mode.startsWith('rsync') ? 'rsync' : 'tar';
     _addBackupLog('Starting backup from $remote to $local with $mode');
-    // TODO: implement start_backup command
+    try {
+      await _runBusy('Starting backup…', () async {
+        final res = await _backend.sendCommand('start_backup', {
+          'remote_path': remote,
+          'local_path': local,
+          'mode': mode,
+        });
+
+        if (res is Map && res.containsKey('error')) {
+          final err = res['error'];
+          _addBackupLog(
+            'Backend does not support start_backup: $err — using fallback',
+          );
+          await _downloadRecursive(remote, local);
+        } else {
+          _addBackupLog('Backup started: $res');
+        }
+      });
+    } catch (e) {
+      _addBackupLog('Backup failed to start: $e — attempting fallback');
+      try {
+        await _downloadRecursive(remote, local);
+      } catch (e2) {
+        _addBackupLog('Fallback failed: $e2');
+      }
+    }
+  }
+
+  Future<void> _downloadRecursive(String remotePath, String localDir) async {
+    _addBackupLog('Fallback: downloading $remotePath -> $localDir');
+    // ensure localDir exists
+    try {
+      final d = Directory(localDir);
+      if (!d.existsSync()) d.createSync(recursive: true);
+    } catch (_) {}
+
+    // Try to list directory on remote
+    try {
+      final listRes = await _backend.sendCommand('list_dir', {
+        'path': remotePath,
+      });
+      if (listRes is Map && listRes.containsKey('error')) {
+        // not a directory, attempt download file
+        final localFile =
+            '$localDir${Platform.pathSeparator}${remotePath.split('/').where((s) => s.isNotEmpty).toList().last}';
+        _addBackupLog('Downloading file $remotePath -> $localFile');
+        await _backend.sendCommand('download', {
+          'remote_path': remotePath,
+          'local_path': localFile,
+        });
+        _addBackupLog('Downloaded $remotePath');
+        return;
+      }
+
+      final entries = List<Map<String, dynamic>>.from(
+        listRes['result'].map(
+          (e) => {'name': e[0], 'is_dir': e[1], 'size': e[2]},
+        ),
+      );
+
+      for (final e in entries) {
+        final name = e['name'];
+        final isDir = e['is_dir'] as bool;
+        final childRemote = remotePath == '/' ? '/$name' : '$remotePath/$name';
+        final childLocal = '$localDir${Platform.pathSeparator}$name';
+        if (isDir) {
+          try {
+            final d = Directory(childLocal);
+            if (!d.existsSync()) d.createSync(recursive: true);
+          } catch (_) {}
+          await _downloadRecursive(childRemote, childLocal);
+        } else {
+          _addBackupLog('Downloading file $childRemote -> $childLocal');
+          try {
+            await _backend.sendCommand('download', {
+              'remote_path': childRemote,
+              'local_path': childLocal,
+            });
+            _addBackupLog('Downloaded $childRemote');
+          } catch (e) {
+            _addBackupLog('Failed to download $childRemote: $e');
+          }
+        }
+      }
+    } catch (e) {
+      // If list_dir failed, treat as file
+      final localFile =
+          '$localDir${Platform.pathSeparator}${remotePath.split('/').where((s) => s.isNotEmpty).toList().last}';
+      _addBackupLog(
+        'Downloading file $remotePath -> $localFile (list failed: $e)',
+      );
+      await _backend.sendCommand('download', {
+        'remote_path': remotePath,
+        'local_path': localFile,
+      });
+      _addBackupLog('Downloaded $remotePath');
+    }
   }
 
   void _pauseBackup() {
