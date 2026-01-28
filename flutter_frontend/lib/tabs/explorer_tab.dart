@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_animate/flutter_animate.dart';
 
 class ExplorerTab extends StatelessWidget {
   final TextEditingController pathController;
@@ -30,66 +31,172 @@ class ExplorerTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(16.0),
-      child: Column(
-        children: [
-          Row(
+    return Column(
+      children: [
+        // Top Bar
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.surface,
+            border: Border(
+              bottom: BorderSide(
+                color: Theme.of(context).dividerColor.withOpacity(0.1),
+              ),
+            ),
+          ),
+          child: Row(
             children: [
+              IconButton(
+                onPressed: onUp,
+                icon: const Icon(Icons.arrow_upward),
+                tooltip: 'Up',
+              ),
+              const SizedBox(width: 8),
               Expanded(
                 child: TextField(
                   controller: pathController,
-                  decoration: const InputDecoration(labelText: 'Path'),
+                  decoration: const InputDecoration(
+                    hintText: 'Path',
+                    contentPadding: EdgeInsets.symmetric(horizontal: 16),
+                    prefixIcon: Icon(Icons.search),
+                  ),
                   onSubmitted: (_) => onRefresh(),
                 ),
               ),
-              IconButton(onPressed: onRefresh, icon: const Icon(Icons.refresh)),
-              IconButton(onPressed: onUp, icon: const Icon(Icons.arrow_upward)),
-              ElevatedButton(
+              const SizedBox(width: 8),
+              IconButton.filledTonal(
+                onPressed: onRefresh,
+                icon: const Icon(Icons.refresh),
+                tooltip: 'Refresh',
+              ),
+              const SizedBox(width: 8),
+              FilledButton.icon(
                 onPressed: onUseForBackup,
-                child: const Text('Use as Source'),
+                icon: const Icon(Icons.save_alt),
+                label: const Text('Use Source'),
               ),
             ],
           ),
-          Expanded(
-            child: ListView.builder(
-              itemCount: explorerEntries.length,
-              itemBuilder: (c, i) {
-                final entry = explorerEntries[i];
-                return ListTile(
-                  leading: Icon(
-                    entry['is_dir'] ? Icons.folder : Icons.insert_drive_file,
-                  ),
-                  title: Text(entry['name']),
-                  subtitle: Text(
-                    entry['is_dir'] ? 'DIR' : '${entry['size']} bytes',
-                  ),
-                  onTap: () => onSelectEntry(entry),
-                );
-              },
-            ),
+        ).animate().slideY(begin: -1, end: 0, duration: 400.ms),
+
+        // List View
+        Expanded(
+          child: explorerEntries.isEmpty
+              ? Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.folder_off,
+                        size: 64,
+                        color: Theme.of(
+                          context,
+                        ).colorScheme.onSurface.withOpacity(0.2),
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        'No files found or not connected',
+                        style: TextStyle(
+                          color: Theme.of(
+                            context,
+                          ).colorScheme.onSurface.withOpacity(0.5),
+                        ),
+                      ),
+                    ],
+                  ).animate().fade(),
+                )
+              : ListView.separated(
+                  padding: const EdgeInsets.all(16),
+                  itemCount: explorerEntries.length,
+                  separatorBuilder: (c, i) => const SizedBox(height: 4),
+                  itemBuilder: (c, i) {
+                    final entry = explorerEntries[i];
+                    final isDir = entry['is_dir'] as bool;
+                    return Card(
+                          margin: EdgeInsets.zero,
+                          child: ListTile(
+                            leading: Container(
+                              padding: const EdgeInsets.all(8),
+                              decoration: BoxDecoration(
+                                color: isDir
+                                    ? Colors.amber.withOpacity(0.2)
+                                    : Colors.blue.withOpacity(0.2),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Icon(
+                                isDir ? Icons.folder : Icons.insert_drive_file,
+                                color: isDir ? Colors.amber : Colors.blue,
+                              ),
+                            ),
+                            title: Text(entry['name']),
+                            subtitle: Text(
+                              isDir ? 'Directory' : '${entry['size']} bytes',
+                            ),
+                            trailing: const Icon(
+                              Icons.chevron_right,
+                              color: Colors.grey,
+                            ),
+                            onTap: () => onSelectEntry(entry),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                        )
+                        .animate()
+                        .fade(duration: 300.ms, delay: (50 * i).ms)
+                        .slideX(begin: 0.1, end: 0);
+                  },
+                ),
+        ),
+
+        // Bottom Actions
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.surface,
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.2),
+                blurRadius: 10,
+                offset: const Offset(0, -5),
+              ),
+            ],
           ),
-          Row(
+          child: Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            alignment: WrapAlignment.center,
             children: [
-              ElevatedButton(
+              ActionChip(
+                avatar: const Icon(Icons.create_new_folder),
+                label: const Text('New Folder'),
                 onPressed: onMkdir,
-                child: const Text('New Folder'),
               ),
-              const SizedBox(width: 8),
-              ElevatedButton(onPressed: onRename, child: const Text('Rename')),
-              const SizedBox(width: 8),
-              ElevatedButton(onPressed: onDelete, child: const Text('Delete')),
-              const SizedBox(width: 8),
-              ElevatedButton(onPressed: onUpload, child: const Text('Upload')),
-              const SizedBox(width: 8),
-              ElevatedButton(
+              ActionChip(
+                avatar: const Icon(Icons.drive_file_rename_outline),
+                label: const Text('Rename'),
+                onPressed: onRename,
+              ),
+              ActionChip(
+                avatar: const Icon(Icons.delete),
+                label: const Text('Delete'),
+                onPressed: onDelete,
+                backgroundColor: Theme.of(context).colorScheme.errorContainer,
+              ),
+              ActionChip(
+                avatar: const Icon(Icons.upload_file),
+                label: const Text('Upload'),
+                onPressed: onUpload,
+              ),
+              ActionChip(
+                avatar: const Icon(Icons.download),
+                label: const Text('Download'),
                 onPressed: onDownload,
-                child: const Text('Download'),
               ),
             ],
           ),
-        ],
-      ),
+        ).animate().slideY(begin: 1, end: 0, delay: 200.ms),
+      ],
     );
   }
 }

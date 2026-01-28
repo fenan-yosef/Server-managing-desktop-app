@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_animate/flutter_animate.dart';
 
 class BackupTab extends StatelessWidget {
   final TextEditingController remoteController;
@@ -31,69 +32,166 @@ class BackupTab extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.all(16.0),
+      padding: const EdgeInsets.all(24.0),
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          TextField(
-            controller: remoteController,
-            decoration: const InputDecoration(
-              labelText: 'Remote source (Linux)',
-            ),
-          ),
-          Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: localController,
-                  decoration: const InputDecoration(
-                    labelText: 'Local backup root',
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(24.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Configuration',
+                    style: Theme.of(context).textTheme.titleLarge,
                   ),
-                ),
+                  const SizedBox(height: 24),
+                  TextField(
+                    controller: remoteController,
+                    decoration: const InputDecoration(
+                      labelText: 'Remote Source Path',
+                      prefixIcon: Icon(Icons.cloud_download),
+                      helperText: 'e.g. /home/user/data',
+                    ),
+                  ).animate().fade().moveX(),
+                  const SizedBox(height: 16),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: localController,
+                          decoration: const InputDecoration(
+                            labelText: 'Local Destination',
+                            prefixIcon: Icon(Icons.save),
+                            helperText: 'e.g. C:/Backups',
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      IconButton.filledTonal(
+                        onPressed: onBrowseLocal,
+                        icon: const Icon(Icons.folder_open),
+                        tooltip: 'Browse Local',
+                      ),
+                    ],
+                  ).animate().fade(delay: 100.ms).moveX(),
+                  const SizedBox(height: 16),
+                  const Text('Backup Mode'),
+                  const SizedBox(height: 8),
+                  SegmentedButton<String>(
+                    segments: const [
+                      ButtonSegment(
+                        value: 'rsync (resumable)',
+                        label: Text('Sync (Rsync)'),
+                        icon: Icon(Icons.sync),
+                      ),
+                      ButtonSegment(
+                        value: 'tar.gz (single archive)',
+                        label: Text('Archive (Tar.gz)'),
+                        icon: Icon(Icons.archive),
+                      ),
+                    ],
+                    selected: {mode},
+                    onSelectionChanged: (s) => onModeChanged(s.first),
+                  ).animate().fade(delay: 200.ms).scale(),
+                ],
               ),
-              IconButton(
-                onPressed: onBrowseLocal,
-                icon: const Icon(Icons.folder),
-              ),
-            ],
-          ),
-          DropdownButton<String>(
-            value: mode,
-            items: [
-              'rsync (resumable)',
-              'tar.gz (single archive)',
-            ].map((e) => DropdownMenuItem(value: e, child: Text(e))).toList(),
-            onChanged: (v) => onModeChanged(v!),
-          ),
-          Row(
-            children: [
-              ElevatedButton(
-                onPressed: onStartBackup,
-                child: const Text('Start Backup'),
-              ),
-              const SizedBox(width: 8),
-              ElevatedButton(
-                onPressed: onPauseBackup,
-                child: const Text('Pause'),
-              ),
-              const SizedBox(width: 8),
-              ElevatedButton(
-                onPressed: onResumeBackup,
-                child: const Text('Resume'),
-              ),
-              const SizedBox(width: 8),
-              ElevatedButton(
-                onPressed: onCancelBackup,
-                child: const Text('Cancel'),
-              ),
-            ],
-          ),
-          LinearProgressIndicator(value: progress / 100),
-          Expanded(
-            child: ListView.builder(
-              itemCount: backupLogs.length,
-              itemBuilder: (c, i) => Text(backupLogs[i]),
             ),
-          ),
+          ).animate().slideY(begin: -0.5, end: 0, duration: 500.ms),
+          const SizedBox(height: 24),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(24.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(
+                        'Operations',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      Text(
+                        '${progress.toStringAsFixed(1)}%',
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  LinearProgressIndicator(
+                    value: progress / 100,
+                    minHeight: 8,
+                    borderRadius: BorderRadius.circular(4),
+                  ).animate(target: progress > 0 ? 1 : 0).shimmer(),
+                  const SizedBox(height: 24),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      FilledButton.icon(
+                        onPressed: onStartBackup,
+                        icon: const Icon(Icons.play_arrow),
+                        label: const Text('Start'),
+                      ),
+                      const SizedBox(width: 12),
+                      OutlinedButton.icon(
+                        onPressed: onPauseBackup,
+                        icon: const Icon(Icons.pause),
+                        label: const Text('Pause'),
+                      ),
+                      const SizedBox(width: 12),
+                      OutlinedButton.icon(
+                        onPressed: onResumeBackup,
+                        icon: const Icon(Icons.play_arrow_outlined),
+                        label: const Text('Resume'),
+                      ),
+                      const SizedBox(width: 12),
+                      FilledButton.icon(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: Theme.of(
+                            context,
+                          ).colorScheme.errorContainer,
+                          foregroundColor: Theme.of(
+                            context,
+                          ).colorScheme.onErrorContainer,
+                        ),
+                        onPressed: onCancelBackup,
+                        icon: const Icon(Icons.stop),
+                        label: const Text('Stop'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ).animate().fade(delay: 300.ms),
+          const SizedBox(height: 24),
+          const Text('Console Log'),
+          const SizedBox(height: 8),
+          Expanded(
+            child: Container(
+              decoration: BoxDecoration(
+                color: const Color(0xFF1E1E1E),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.white10),
+              ),
+              child: ListView.builder(
+                padding: const EdgeInsets.all(16),
+                itemCount: backupLogs.length,
+                itemBuilder: (c, i) {
+                  return Text(
+                    backupLogs[i],
+                    style: const TextStyle(
+                      fontFamily: 'Consolas',
+                      color: Color(0xFFCCCCCC),
+                      fontSize: 12,
+                    ),
+                  ).animate().fade().slideX(begin: -0.1, end: 0);
+                },
+              ),
+            ),
+          ).animate().slideY(begin: 0.5, end: 0, delay: 400.ms),
         ],
       ),
     );

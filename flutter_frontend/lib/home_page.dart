@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter_animate/flutter_animate.dart';
 import 'services/backend_service.dart';
 import 'tabs/login_tab.dart';
 import 'tabs/explorer_tab.dart';
@@ -14,11 +15,11 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
+class _HomePageState extends State<HomePage> {
   final BackendService _backend = BackendService();
   final List<String> _logs = [];
 
-  late TabController _tabController;
+  int _selectedIndex = 0;
 
   // Login
   final _hostController = TextEditingController(text: 'localhost');
@@ -45,14 +46,12 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 4, vsync: this);
     _backend.onLog = (msg) => setState(() => _logs.add(msg));
     _backend.startBackend();
   }
 
   @override
   void dispose() {
-    _tabController.dispose();
     _hostController.dispose();
     _portController.dispose();
     _userController.dispose();
@@ -72,7 +71,7 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     final pass = _passController.text;
     final key = _keyController.text;
     try {
-      final result = await _backend.sendCommand('connect', {
+      await _backend.sendCommand('connect', {
         'host': host,
         'port': port,
         'username': user,
@@ -120,8 +119,8 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
     final path = _pathController.text;
     final newPath = path == '/'
         ? '/'
-        : path.substring(0, path.lastIndexOf('/')) ?? '/';
-    _pathController.text = newPath;
+        : path.substring(0, path.lastIndexOf('/'));
+    _pathController.text = newPath.isEmpty ? '/' : newPath;
     _refreshExplorer();
   }
 
@@ -142,8 +141,10 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
       orElse: () => {},
     );
     if (item.isNotEmpty) {
-      _remoteController.text = '${_pathController.text}/${item['name']}';
-      _tabController.animateTo(2); // go to backup tab
+      setState(() {
+        _remoteController.text = '${_pathController.text}/${item['name']}';
+        _selectedIndex = 2; // Switch to Backup tab
+      });
     }
   }
 
@@ -300,65 +301,120 @@ class _HomePageState extends State<HomePage> with TickerProviderStateMixin {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Server Backup (Flutter)'),
-        bottom: TabBar(
-          controller: _tabController,
-          tabs: const [
-            Tab(text: 'Login'),
-            Tab(text: 'Explorer'),
-            Tab(text: 'Backup'),
-            Tab(text: 'Jobs'),
-          ],
-        ),
-      ),
-      body: TabBarView(
-        controller: _tabController,
+      body: Row(
         children: [
-          LoginTab(
-            hostController: _hostController,
-            portController: _portController,
-            userController: _userController,
-            keyController: _keyController,
-            passController: _passController,
-            loginStatus: _loginStatus,
-            onConnect: _connect,
-            onDisconnect: _disconnect,
+          NavigationRail(
+            selectedIndex: _selectedIndex,
+            onDestinationSelected: (val) =>
+                setState(() => _selectedIndex = val),
+            labelType: NavigationRailLabelType.all,
+            backgroundColor: Theme.of(context).colorScheme.surface,
+            destinations: const [
+              NavigationRailDestination(
+                icon: Icon(Icons.login),
+                label: Text('Connect'),
+              ),
+              NavigationRailDestination(
+                icon: Icon(Icons.folder_open),
+                label: Text('Explorer'),
+              ),
+              NavigationRailDestination(
+                icon: Icon(Icons.backup_outlined),
+                label: Text('Backup'),
+              ),
+              NavigationRailDestination(
+                icon: Icon(Icons.task_alt),
+                label: Text('Jobs'),
+              ),
+            ],
+          ).animate().slideX(
+            begin: -1,
+            end: 0,
+            duration: 600.ms,
+            curve: Curves.easeOutQuint,
           ),
-          ExplorerTab(
-            pathController: _pathController,
-            explorerEntries: _explorerEntries,
-            onRefresh: _refreshExplorer,
-            onUp: _upExplorer,
-            onSelectEntry: _selectEntry,
-            onUseForBackup: _useForBackup,
-            onMkdir: _mkdir,
-            onRename: _rename,
-            onDelete: _delete,
-            onUpload: _upload,
-            onDownload: _download,
-          ),
-          BackupTab(
-            remoteController: _remoteController,
-            localController: _localController,
-            mode: _mode,
-            progress: _progress,
-            backupLogs: _backupLogs,
-            onModeChanged: (v) => setState(() => _mode = v),
-            onBrowseLocal: _browseLocal,
-            onStartBackup: _startBackup,
-            onPauseBackup: _pauseBackup,
-            onResumeBackup: _resumeBackup,
-            onCancelBackup: _cancelBackup,
-          ),
-          JobsTab(
-            jobs: _jobs,
-            onRefreshJobs: _refreshJobs,
-            onResumeJob: _resumeJob,
-            onDeleteJob: _deleteJob,
+          const VerticalDivider(width: 1, thickness: 1),
+          Expanded(
+            child: AnimatedSwitcher(
+              duration: 400.ms,
+              switchInCurve: Curves.easeOutQuart,
+              switchOutCurve: Curves.easeInQuart,
+              transitionBuilder: (child, animation) {
+                return FadeTransition(
+                  opacity: animation,
+                  child: SlideTransition(
+                    position: Tween<Offset>(
+                      begin: const Offset(0.05, 0),
+                      end: Offset.zero,
+                    ).animate(animation),
+                    child: child,
+                  ),
+                );
+              },
+              child: KeyedSubtree(
+                key: ValueKey(_selectedIndex),
+                child: Container(
+                  color: Theme.of(context).scaffoldBackgroundColor,
+                  child: _buildTabContent(_selectedIndex),
+                ),
+              ),
+            ),
           ),
         ],
       ),
     );
+  }
+
+  Widget _buildTabContent(int index) {
+    switch (index) {
+      case 0:
+        return LoginTab(
+          hostController: _hostController,
+          portController: _portController,
+          userController: _userController,
+          keyController: _keyController,
+          passController: _passController,
+          loginStatus: _loginStatus,
+          onConnect: _connect,
+          onDisconnect: _disconnect,
+        );
+      case 1:
+        return ExplorerTab(
+          pathController: _pathController,
+          explorerEntries: _explorerEntries,
+          onRefresh: _refreshExplorer,
+          onUp: _upExplorer,
+          onSelectEntry: _selectEntry,
+          onUseForBackup: _useForBackup,
+          onMkdir: _mkdir,
+          onRename: _rename,
+          onDelete: _delete,
+          onUpload: _upload,
+          onDownload: _download,
+        );
+      case 2:
+        return BackupTab(
+          remoteController: _remoteController,
+          localController: _localController,
+          mode: _mode,
+          progress: _progress,
+          backupLogs: _backupLogs,
+          onModeChanged: (v) => setState(() => _mode = v),
+          onBrowseLocal: _browseLocal,
+          onStartBackup: _startBackup,
+          onPauseBackup: _pauseBackup,
+          onResumeBackup: _resumeBackup,
+          onCancelBackup: _cancelBackup,
+        );
+      case 3:
+        return JobsTab(
+          jobs: _jobs,
+          onRefreshJobs: _refreshJobs,
+          onResumeJob: _resumeJob,
+          onDeleteJob: _deleteJob,
+        );
+      default:
+        return const Center(child: Text('Unknown Tab'));
+    }
   }
 }
