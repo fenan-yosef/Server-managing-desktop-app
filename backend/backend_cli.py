@@ -37,6 +37,8 @@ class JSONSocketHandler(threading.Thread):
             pass
 
     def run(self):
+        # Ensure we modify the module-level `explorer` when assigning
+        global explorer
         try:
             buf = b""
             while True:
@@ -67,14 +69,12 @@ class JSONSocketHandler(threading.Thread):
                         password = msg.get("password")
                         try:
                             ssh.connect(host, port, username, key_path, password)
-                            global explorer
                             explorer = ExplorerModel(ssh)
                             self.send_json({"id": req_id, "result": "connected"})
                         except Exception as e:
                             self.send_json({"id": req_id, "error": str(e)})
                     elif cmd == "disconnect":
                         ssh.disconnect()
-                        global explorer
                         explorer = None
                         self.send_json({"id": req_id, "result": "disconnected"})
                     elif cmd == "list_dir":

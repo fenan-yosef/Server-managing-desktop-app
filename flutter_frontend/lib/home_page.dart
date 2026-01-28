@@ -47,7 +47,7 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     _backend.onLog = (msg) => setState(() => _logs.add(msg));
-    _backend.startBackend();
+    // Do not start backend here. It starts on 'Connect'.
   }
 
   @override
@@ -65,12 +65,18 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _connect() async {
-    final host = _hostController.text;
-    final port = int.tryParse(_portController.text) ?? 22;
-    final user = _userController.text;
-    final pass = _passController.text;
-    final key = _keyController.text;
+    setState(() => _loginStatus = 'Connecting...');
     try {
+      // 1. Start the backend process & socket
+      await _backend.startBackend();
+
+      // 2. Perform SSH login
+      final host = _hostController.text;
+      final port = int.tryParse(_portController.text) ?? 22;
+      final user = _userController.text;
+      final pass = _passController.text;
+      final key = _keyController.text;
+
       await _backend.sendCommand('connect', {
         'host': host,
         'port': port,
@@ -85,17 +91,25 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         _loginStatus = 'Connection failed: $e';
       });
+      // If login failed, we might want to keep the backend running or stop it.
+      // Usually better to stop it if the "Connect" action as a whole failed
+      // to keep state clean, unless we want to retry.
+      // But user said "start running ... and keep it".
+      // If SSH fails, the backend is still running. That's probably fine.
     }
   }
 
   Future<void> _disconnect() async {
     try {
       await _backend.sendCommand('disconnect', {});
+    } catch (e) {
+      // ignore
+    } finally {
+      // Always stop the backend on disconnect/logout
+      await _backend.stopBackend();
       setState(() {
         _loginStatus = 'Disconnected';
       });
-    } catch (e) {
-      // ignore
     }
   }
 
