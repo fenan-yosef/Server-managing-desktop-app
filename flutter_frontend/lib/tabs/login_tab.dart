@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter_animate/flutter_animate.dart';
+import '../services/login_history.dart';
 
 class LoginTab extends StatelessWidget {
   final TextEditingController hostController;
@@ -9,6 +10,11 @@ class LoginTab extends StatelessWidget {
   final TextEditingController keyController;
   final TextEditingController passController;
   final String loginStatus;
+  final bool isBusy;
+  final List<LoginProfile> recentLogins;
+  final void Function(LoginProfile) onSelectRecent;
+  final void Function(LoginProfile) onRemoveRecent;
+  final VoidCallback onClearRecent;
   final Future<void> Function() onConnect;
   final Future<void> Function() onDisconnect;
 
@@ -20,6 +26,11 @@ class LoginTab extends StatelessWidget {
     required this.keyController,
     required this.passController,
     required this.loginStatus,
+    this.isBusy = false,
+    this.recentLogins = const [],
+    required this.onSelectRecent,
+    required this.onRemoveRecent,
+    required this.onClearRecent,
     required this.onConnect,
     required this.onDisconnect,
   });
@@ -48,7 +59,36 @@ class LoginTab extends StatelessWidget {
                 style: Theme.of(context).textTheme.headlineSmall,
                 textAlign: TextAlign.center,
               ).animate().fade().moveY(begin: -10, end: 0),
-              const SizedBox(height: 24),
+              const SizedBox(height: 16),
+              if (recentLogins.isNotEmpty) ...[
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      'Recent',
+                      style: Theme.of(context).textTheme.bodyLarge,
+                    ),
+                    TextButton(
+                      onPressed: onClearRecent,
+                      child: const Text('Clear'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: recentLogins.map((p) {
+                    return InputChip(
+                      label: Text(p.label),
+                      onPressed: () => onSelectRecent(p),
+                      onDeleted: () => onRemoveRecent(p),
+                    );
+                  }).toList(),
+                ),
+                const SizedBox(height: 18),
+              ],
+              const SizedBox(height: 8),
               Row(
                 children: [
                   Expanded(
@@ -113,9 +153,15 @@ class LoginTab extends StatelessWidget {
                 children: [
                   Expanded(
                     child: FilledButton.icon(
-                      onPressed: onConnect,
+                      onPressed: isBusy ? null : onConnect,
                       icon: const Icon(Icons.login),
-                      label: const Text('Connect'),
+                      label: isBusy
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Text('Connect'),
                     ),
                   ),
                   if (loginStatus == 'Connected') ...[
@@ -125,7 +171,7 @@ class LoginTab extends StatelessWidget {
                         style: FilledButton.styleFrom(
                           backgroundColor: Theme.of(context).colorScheme.error,
                         ),
-                        onPressed: onDisconnect,
+                        onPressed: isBusy ? null : onDisconnect,
                         icon: const Icon(Icons.logout),
                         label: const Text('Disconnect'),
                       ),

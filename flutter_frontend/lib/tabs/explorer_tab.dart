@@ -1,7 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 
-class ExplorerTab extends StatelessWidget {
+enum ExplorerViewMode { details, grid, smallIcons, tinyList }
+
+enum ExplorerSortBy { name, size, type }
+
+class ExplorerTab extends StatefulWidget {
   final TextEditingController pathController;
   final List<Map<String, dynamic>> explorerEntries;
   final Future<void> Function() onRefresh;
@@ -13,6 +17,8 @@ class ExplorerTab extends StatelessWidget {
   final Future<void> Function() onDelete;
   final Future<void> Function() onUpload;
   final Future<void> Function() onDownload;
+  final Future<void> Function(String) onOpenExternal;
+  final Future<void> Function(String) onOpenInternal;
 
   const ExplorerTab({
     super.key,
@@ -27,61 +33,144 @@ class ExplorerTab extends StatelessWidget {
     required this.onDelete,
     required this.onUpload,
     required this.onDownload,
+    required this.onOpenExternal,
+    required this.onOpenInternal,
   });
 
   @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        // Top Bar
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.surface,
-            border: Border(
-              bottom: BorderSide(
-                color: Theme.of(context).dividerColor.withOpacity(0.1),
+  State<ExplorerTab> createState() => _ExplorerTabState();
+}
+
+class _ExplorerTabState extends State<ExplorerTab> {
+  ExplorerViewMode _viewMode = ExplorerViewMode.details;
+  ExplorerSortBy _sortBy = ExplorerSortBy.name;
+  bool _ascending = true;
+
+  List<Map<String, dynamic>> get _entries => widget.explorerEntries;
+
+  List<Map<String, dynamic>> get _sortedEntries {
+    final list = List<Map<String, dynamic>>.from(_entries);
+    list.sort((a, b) {
+      // dirs-first by type if sorting by type, otherwise optional
+      if (_sortBy == ExplorerSortBy.name) {
+        final an = (a['name'] ?? '').toString().toLowerCase();
+        final bn = (b['name'] ?? '').toString().toLowerCase();
+        return an.compareTo(bn) * (_ascending ? 1 : -1);
+      } else if (_sortBy == ExplorerSortBy.size) {
+        final asz = (a['size'] ?? 0) as num;
+        final bsz = (b['size'] ?? 0) as num;
+        return (asz == bsz)
+            ? 0
+            : ((asz < bsz ? -1 : 1) * (_ascending ? 1 : -1));
+      } else if (_sortBy == ExplorerSortBy.type) {
+        final ad = a['is_dir'] ? 0 : 1;
+        final bd = b['is_dir'] ? 0 : 1;
+        final cmp = ad.compareTo(bd);
+        if (cmp != 0) return (_ascending ? 1 : -1) * cmp;
+        // fallback to name
+        final an = (a['name'] ?? '').toString().toLowerCase();
+        final bn = (b['name'] ?? '').toString().toLowerCase();
+        return an.compareTo(bn) * (_ascending ? 1 : -1);
+      }
+      return 0;
+    });
+    return list;
+  }
+
+  @override
+  void didUpdateWidget(covariant ExplorerTab oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // nothing for now — entries read from widget
+  }
+
+  Widget _buildTopControls(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surface,
+        border: Border(
+          bottom: BorderSide(
+            color: Theme.of(context).dividerColor.withOpacity(0.1),
+          ),
+        ),
+      ),
+      child: Row(
+        children: [
+          IconButton(
+            onPressed: widget.onUp,
+            icon: const Icon(Icons.arrow_upward),
+            tooltip: 'Up',
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: TextField(
+              controller: widget.pathController,
+              decoration: const InputDecoration(
+                hintText: 'Path',
+                contentPadding: EdgeInsets.symmetric(horizontal: 16),
+                prefixIcon: Icon(Icons.search),
               ),
+              onSubmitted: (_) => widget.onRefresh(),
             ),
           ),
-          child: Row(
-            children: [
-              IconButton(
-                onPressed: onUp,
-                icon: const Icon(Icons.arrow_upward),
-                tooltip: 'Up',
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: TextField(
-                  controller: pathController,
-                  decoration: const InputDecoration(
-                    hintText: 'Path',
-                    contentPadding: EdgeInsets.symmetric(horizontal: 16),
-                    prefixIcon: Icon(Icons.search),
-                  ),
-                  onSubmitted: (_) => onRefresh(),
-                ),
-              ),
-              const SizedBox(width: 8),
-              IconButton.filledTonal(
-                onPressed: onRefresh,
-                icon: const Icon(Icons.refresh),
-                tooltip: 'Refresh',
-              ),
-              const SizedBox(width: 8),
-              FilledButton.icon(
-                onPressed: onUseForBackup,
-                icon: const Icon(Icons.save_alt),
-                label: const Text('Use Source'),
-              ),
-            ],
+          const SizedBox(width: 8),
+          IconButton.filledTonal(
+            onPressed: widget.onRefresh,
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Refresh',
           ),
-        ).animate().slideY(begin: -1, end: 0, duration: 400.ms),
+          const SizedBox(width: 8),
+          // View mode selector
+          DropdownButton<ExplorerViewMode>(
+            value: _viewMode,
+            dropdownColor: Theme.of(context).colorScheme.surface,
+            onChanged: (v) => setState(() => _viewMode = v ?? _viewMode),
+            underline: const SizedBox.shrink(),
+            items: ExplorerViewMode.values.map((m) {
+              return DropdownMenuItem(
+                value: m,
+                child: Text(m.toString().split('.').last),
+              );
+            }).toList(),
+          ),
+          const SizedBox(width: 8),
+          // Sort selector
+          DropdownButton<ExplorerSortBy>(
+            value: _sortBy,
+            dropdownColor: Theme.of(context).colorScheme.surface,
+            onChanged: (v) => setState(() => _sortBy = v ?? _sortBy),
+            underline: const SizedBox.shrink(),
+            items: ExplorerSortBy.values.map((s) {
+              return DropdownMenuItem(
+                value: s,
+                child: Text(s.toString().split('.').last),
+              );
+            }).toList(),
+          ),
+          IconButton(
+            onPressed: () => setState(() => _ascending = !_ascending),
+            icon: Icon(_ascending ? Icons.arrow_upward : Icons.arrow_downward),
+            tooltip: 'Toggle sort direction',
+          ),
+          const SizedBox(width: 8),
+          FilledButton.icon(
+            onPressed: widget.onUseForBackup,
+            icon: const Icon(Icons.save_alt),
+            label: const Text('Use Source'),
+          ),
+        ],
+      ),
+    ).animate().slideY(begin: -1, end: 0, duration: 400.ms);
+  }
 
-        // List View
+  @override
+  Widget build(BuildContext context) {
+    final entries = _sortedEntries;
+    return Column(
+      children: [
+        _buildTopControls(context),
         Expanded(
-          child: explorerEntries.isEmpty
+          child: entries.isEmpty
               ? Center(
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
@@ -105,46 +194,320 @@ class ExplorerTab extends StatelessWidget {
                     ],
                   ).animate().fade(),
                 )
-              : ListView.separated(
-                  padding: const EdgeInsets.all(16),
-                  itemCount: explorerEntries.length,
-                  separatorBuilder: (c, i) => const SizedBox(height: 4),
-                  itemBuilder: (c, i) {
-                    final entry = explorerEntries[i];
-                    final isDir = entry['is_dir'] as bool;
-                    return Card(
-                          margin: EdgeInsets.zero,
-                          child: ListTile(
-                            leading: Container(
-                              padding: const EdgeInsets.all(8),
-                              decoration: BoxDecoration(
-                                color: isDir
-                                    ? Colors.amber.withOpacity(0.2)
-                                    : Colors.blue.withOpacity(0.2),
-                                borderRadius: BorderRadius.circular(8),
+              : Builder(
+                  builder: (c) {
+                    if (_viewMode == ExplorerViewMode.grid) {
+                      return GridView.builder(
+                        padding: const EdgeInsets.all(16),
+                        gridDelegate:
+                            const SliverGridDelegateWithFixedCrossAxisCount(
+                              crossAxisCount: 4,
+                              childAspectRatio: 1,
+                              mainAxisSpacing: 12,
+                              crossAxisSpacing: 12,
+                            ),
+                        itemCount: entries.length,
+                        itemBuilder: (ctx, i) {
+                          final e = entries[i];
+                          final isDir = e['is_dir'] as bool;
+                          return GestureDetector(
+                            onTap: () {
+                              final remote = widget.pathController.text == '/'
+                                  ? '/${e['name']}'
+                                  : '${widget.pathController.text}/${e['name']}';
+                              if (isDir) {
+                                widget.onSelectEntry(e);
+                              } else {
+                                showModalBottomSheet(
+                                  context: context,
+                                  builder: (ctx) => SafeArea(
+                                    child: Wrap(
+                                      children: [
+                                        ListTile(
+                                          leading: const Icon(Icons.article),
+                                          title: const Text('Open (internal)'),
+                                          onTap: () {
+                                            Navigator.pop(ctx);
+                                            widget.onOpenInternal(remote);
+                                          },
+                                        ),
+                                        ListTile(
+                                          leading: const Icon(
+                                            Icons.open_in_new,
+                                          ),
+                                          title: const Text('Open (external)'),
+                                          onTap: () {
+                                            Navigator.pop(ctx);
+                                            widget.onOpenExternal(remote);
+                                          },
+                                        ),
+                                        ListTile(
+                                          leading: const Icon(Icons.download),
+                                          title: const Text('Download'),
+                                          onTap: () {
+                                            Navigator.pop(ctx);
+                                            widget.onDownload();
+                                          },
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              }
+                            },
+                            child: Card(
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(
+                                    isDir
+                                        ? Icons.folder
+                                        : Icons.insert_drive_file,
+                                    size: 36,
+                                    color: isDir ? Colors.amber : Colors.blue,
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    e['name'],
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ],
                               ),
-                              child: Icon(
-                                isDir ? Icons.folder : Icons.insert_drive_file,
-                                color: isDir ? Colors.amber : Colors.blue,
+                            ),
+                          ).animate().fade(delay: (30 * i).ms);
+                        },
+                      );
+                    }
+
+                    if (_viewMode == ExplorerViewMode.smallIcons) {
+                      return ListView.builder(
+                        padding: const EdgeInsets.all(12),
+                        itemCount: entries.length,
+                        itemBuilder: (ctx, i) {
+                          final e = entries[i];
+                          final isDir = e['is_dir'] as bool;
+                          return ListTile(
+                            leading: Icon(
+                              isDir ? Icons.folder : Icons.insert_drive_file,
+                              color: isDir ? Colors.amber : Colors.blue,
+                            ),
+                            title: Text(e['name']),
+                            onTap: () {
+                              final remote = widget.pathController.text == '/'
+                                  ? '/${e['name']}'
+                                  : '${widget.pathController.text}/${e['name']}';
+                              if (isDir) {
+                                widget.onSelectEntry(e);
+                              } else {
+                                showModalBottomSheet(
+                                  context: context,
+                                  builder: (ctx) => SafeArea(
+                                    child: Wrap(
+                                      children: [
+                                        ListTile(
+                                          leading: const Icon(Icons.article),
+                                          title: const Text('Open (internal)'),
+                                          onTap: () {
+                                            Navigator.pop(ctx);
+                                            widget.onOpenInternal(remote);
+                                          },
+                                        ),
+                                        ListTile(
+                                          leading: const Icon(
+                                            Icons.open_in_new,
+                                          ),
+                                          title: const Text('Open (external)'),
+                                          onTap: () {
+                                            Navigator.pop(ctx);
+                                            widget.onOpenExternal(remote);
+                                          },
+                                        ),
+                                        ListTile(
+                                          leading: const Icon(Icons.download),
+                                          title: const Text('Download'),
+                                          onTap: () {
+                                            Navigator.pop(ctx);
+                                            widget.onDownload();
+                                          },
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              }
+                            },
+                          ).animate().fade(delay: (20 * i).ms);
+                        },
+                      );
+                    }
+
+                    if (_viewMode == ExplorerViewMode.tinyList) {
+                      return ListView.builder(
+                        padding: const EdgeInsets.all(8),
+                        itemCount: entries.length,
+                        itemBuilder: (ctx, i) {
+                          final e = entries[i];
+                          final isDir = e['is_dir'] as bool;
+                          return ListTile(
+                            minLeadingWidth: 4,
+                            dense: true,
+                            leading: Icon(
+                              isDir ? Icons.folder : Icons.insert_drive_file,
+                              size: 18,
+                              color: isDir ? Colors.amber : Colors.blue,
+                            ),
+                            title: Text(
+                              e['name'],
+                              style: const TextStyle(fontSize: 12),
+                            ),
+                            onTap: () {
+                              final remote = widget.pathController.text == '/'
+                                  ? '/${e['name']}'
+                                  : '${widget.pathController.text}/${e['name']}';
+                              if (isDir) {
+                                widget.onSelectEntry(e);
+                              } else {
+                                showModalBottomSheet(
+                                  context: context,
+                                  builder: (ctx) => SafeArea(
+                                    child: Wrap(
+                                      children: [
+                                        ListTile(
+                                          leading: const Icon(Icons.article),
+                                          title: const Text('Open (internal)'),
+                                          onTap: () {
+                                            Navigator.pop(ctx);
+                                            widget.onOpenInternal(remote);
+                                          },
+                                        ),
+                                        ListTile(
+                                          leading: const Icon(
+                                            Icons.open_in_new,
+                                          ),
+                                          title: const Text('Open (external)'),
+                                          onTap: () {
+                                            Navigator.pop(ctx);
+                                            widget.onOpenExternal(remote);
+                                          },
+                                        ),
+                                        ListTile(
+                                          leading: const Icon(Icons.download),
+                                          title: const Text('Download'),
+                                          onTap: () {
+                                            Navigator.pop(ctx);
+                                            widget.onDownload();
+                                          },
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              }
+                            },
+                          );
+                        },
+                      );
+                    }
+
+                    // default: details
+                    return ListView.separated(
+                      padding: const EdgeInsets.all(16),
+                      itemCount: entries.length,
+                      separatorBuilder: (c, i) => const SizedBox(height: 4),
+                      itemBuilder: (c, i) {
+                        final entry = entries[i];
+                        final isDir = entry['is_dir'] as bool;
+                        return Card(
+                              margin: EdgeInsets.zero,
+                              child: ListTile(
+                                leading: Container(
+                                  padding: const EdgeInsets.all(8),
+                                  decoration: BoxDecoration(
+                                    color: isDir
+                                        ? Colors.amber.withOpacity(0.2)
+                                        : Colors.blue.withOpacity(0.2),
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: Icon(
+                                    isDir
+                                        ? Icons.folder
+                                        : Icons.insert_drive_file,
+                                    color: isDir ? Colors.amber : Colors.blue,
+                                  ),
+                                ),
+                                title: Text(entry['name']),
+                                subtitle: Text(
+                                  isDir
+                                      ? 'Directory'
+                                      : '${entry['size']} bytes',
+                                ),
+                                trailing: const Icon(
+                                  Icons.chevron_right,
+                                  color: Colors.grey,
+                                ),
+                                onTap: () {
+                                  final remote =
+                                      widget.pathController.text == '/'
+                                      ? '/${entry['name']}'
+                                      : '${widget.pathController.text}/${entry['name']}';
+                                  if (isDir) {
+                                    widget.onSelectEntry(entry);
+                                  } else {
+                                    showModalBottomSheet(
+                                      context: context,
+                                      builder: (ctx) => SafeArea(
+                                        child: Wrap(
+                                          children: [
+                                            ListTile(
+                                              leading: const Icon(
+                                                Icons.article,
+                                              ),
+                                              title: const Text(
+                                                'Open (internal)',
+                                              ),
+                                              onTap: () {
+                                                Navigator.pop(ctx);
+                                                widget.onOpenInternal(remote);
+                                              },
+                                            ),
+                                            ListTile(
+                                              leading: const Icon(
+                                                Icons.open_in_new,
+                                              ),
+                                              title: const Text(
+                                                'Open (external)',
+                                              ),
+                                              onTap: () {
+                                                Navigator.pop(ctx);
+                                                widget.onOpenExternal(remote);
+                                              },
+                                            ),
+                                            ListTile(
+                                              leading: const Icon(
+                                                Icons.download,
+                                              ),
+                                              title: const Text('Download'),
+                                              onTap: () {
+                                                Navigator.pop(ctx);
+                                                widget.onDownload();
+                                              },
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    );
+                                  }
+                                },
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
                               ),
-                            ),
-                            title: Text(entry['name']),
-                            subtitle: Text(
-                              isDir ? 'Directory' : '${entry['size']} bytes',
-                            ),
-                            trailing: const Icon(
-                              Icons.chevron_right,
-                              color: Colors.grey,
-                            ),
-                            onTap: () => onSelectEntry(entry),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                          ),
-                        )
-                        .animate()
-                        .fade(duration: 300.ms, delay: (50 * i).ms)
-                        .slideX(begin: 0.1, end: 0);
+                            )
+                            .animate()
+                            .fade(duration: 300.ms, delay: (50 * i).ms)
+                            .slideX(begin: 0.1, end: 0);
+                      },
+                    );
                   },
                 ),
         ),
@@ -170,28 +533,28 @@ class ExplorerTab extends StatelessWidget {
               ActionChip(
                 avatar: const Icon(Icons.create_new_folder),
                 label: const Text('New Folder'),
-                onPressed: onMkdir,
+                onPressed: widget.onMkdir,
               ),
               ActionChip(
                 avatar: const Icon(Icons.drive_file_rename_outline),
                 label: const Text('Rename'),
-                onPressed: onRename,
+                onPressed: widget.onRename,
               ),
               ActionChip(
                 avatar: const Icon(Icons.delete),
                 label: const Text('Delete'),
-                onPressed: onDelete,
+                onPressed: widget.onDelete,
                 backgroundColor: Theme.of(context).colorScheme.errorContainer,
               ),
               ActionChip(
                 avatar: const Icon(Icons.upload_file),
                 label: const Text('Upload'),
-                onPressed: onUpload,
+                onPressed: widget.onUpload,
               ),
               ActionChip(
                 avatar: const Icon(Icons.download),
                 label: const Text('Download'),
-                onPressed: onDownload,
+                onPressed: widget.onDownload,
               ),
             ],
           ),

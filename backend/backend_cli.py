@@ -12,6 +12,7 @@ import sys
 import socket
 import threading
 import json
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -55,6 +56,12 @@ class JSONSocketHandler(threading.Thread):
                         continue
                     cmd = msg.get("cmd")
                     req_id = msg.get("id")
+                    # Support two shapes: legacy top-level params, or
+                    # structured {"params": {...}} from the frontend helper.
+                    params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+                    # Helper to read from params first, then top-level
+                    def pget(k, default=None):
+                        return params.get(k, msg.get(k, default))
                     if cmd == "ping":
                         self.send_json({"id": req_id, "result": "pong"})
                     elif cmd == "time":
@@ -62,11 +69,11 @@ class JSONSocketHandler(threading.Thread):
                     elif cmd == "echo":
                         self.send_json({"id": req_id, "result": f"echo: {msg.get('params')}"})
                     elif cmd == "connect":
-                        host = msg.get("host")
-                        port = msg.get("port", 22)
-                        username = msg.get("username")
-                        key_path = msg.get("key_path")
-                        password = msg.get("password")
+                        host = pget("host")
+                        port = pget("port", 22)
+                        username = pget("username")
+                        key_path = pget("key_path")
+                        password = pget("password")
                         try:
                             ssh.connect(host, port, username, key_path, password)
                             explorer = ExplorerModel(ssh)
@@ -78,7 +85,7 @@ class JSONSocketHandler(threading.Thread):
                         explorer = None
                         self.send_json({"id": req_id, "result": "disconnected"})
                     elif cmd == "list_dir":
-                        path = msg.get("path")
+                        path = pget("path")
                         if explorer:
                             try:
                                 entries = explorer.list_dir(path)
@@ -88,7 +95,7 @@ class JSONSocketHandler(threading.Thread):
                         else:
                             self.send_json({"id": req_id, "error": "not connected"})
                     elif cmd == "make_dir":
-                        path = msg.get("path")
+                        path = pget("path")
                         if explorer:
                             try:
                                 explorer.make_dir(path)
@@ -98,7 +105,7 @@ class JSONSocketHandler(threading.Thread):
                         else:
                             self.send_json({"id": req_id, "error": "not connected"})
                     elif cmd == "delete":
-                        path = msg.get("path")
+                        path = pget("path")
                         if explorer:
                             try:
                                 explorer.delete(path)
@@ -108,8 +115,8 @@ class JSONSocketHandler(threading.Thread):
                         else:
                             self.send_json({"id": req_id, "error": "not connected"})
                     elif cmd == "rename":
-                        old_path = msg.get("old_path")
-                        new_path = msg.get("new_path")
+                        old_path = pget("old_path")
+                        new_path = pget("new_path")
                         if explorer:
                             try:
                                 explorer.rename(old_path, new_path)
@@ -119,8 +126,8 @@ class JSONSocketHandler(threading.Thread):
                         else:
                             self.send_json({"id": req_id, "error": "not connected"})
                     elif cmd == "upload":
-                        local_path = msg.get("local_path")
-                        remote_path = msg.get("remote_path")
+                        local_path = pget("local_path")
+                        remote_path = pget("remote_path")
                         if explorer:
                             try:
                                 explorer.upload(Path(local_path), remote_path)
@@ -130,12 +137,40 @@ class JSONSocketHandler(threading.Thread):
                         else:
                             self.send_json({"id": req_id, "error": "not connected"})
                     elif cmd == "download":
-                        remote_path = msg.get("remote_path")
-                        local_path = msg.get("local_path")
+                        remote_path = pget("remote_path")
+                        local_path = pget("local_path")
                         if explorer:
                             try:
                                 explorer.download(remote_path, Path(local_path))
                                 self.send_json({"id": req_id, "result": "ok"})
+                            except Exception as e:
+                                self.send_json({"id": req_id, "error": str(e)})
+                        else:
+                            self.send_json({"id": req_id, "error": "not connected"})
+                    elif cmd == "read_file":
+                        remote_path = pget("remote_path")
+                        if explorer:
+                            try:
+                                # Prefer a direct read API if available
+                                if hasattr(explorer, 'read_file'):
+                                    content = explorer.read_file(remote_path)
+                                    self.send_json({"id": req_id, "result": content})
+                                else:
+                                    # Fallback: download to a temp file and return text
+                                    tf = tempfile.NamedTemporaryFile(delete=False)
+                                    tf.close()
+                                    tmp_path = Path(tf.name)
+                                    explorer.download(remote_path, tmp_path)
+                                    try:
+                                        text = tmp_path.read_text(encoding='utf-8')
+                                    except Exception:
+                                        text = tmp_path.read_text(encoding='latin-1')
+                                    # cleanup
+                                    try:
+                                        tmp_path.unlink()
+                                    except Exception:
+                                        pass
+                                    self.send_json({"id": req_id, "result": text})
                             except Exception as e:
                                 self.send_json({"id": req_id, "error": str(e)})
                         else:
@@ -145,7 +180,7 @@ class JSONSocketHandler(threading.Thread):
                         result = [{"job_id": j.job_id, "source": j.source, "target_root": j.target_root, "status": j.status, "phase": j.phase, "progress": j.progress, "can_resume": j.can_resume, "message": j.message, "mode": j.mode} for j in jobs]
                         self.send_json({"id": req_id, "result": result})
                     elif cmd == "delete_job":
-                        job_id = msg.get("job_id")
+                        job_id = pget("job_id")
                         store.delete(job_id)
                         self.send_json({"id": req_id, "result": "ok"})
                     else:

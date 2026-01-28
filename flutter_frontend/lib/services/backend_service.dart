@@ -6,7 +6,7 @@ class BackendService {
   Process? _proc;
   Socket? _socket;
   final List<String> _logs = [];
-  StreamSubscription<String>? _outSub;
+  IOSink? _logSink;
 
   int _nextId = 1;
   final Map<int, Completer<dynamic>> _pending = {};
@@ -14,6 +14,23 @@ class BackendService {
   void Function(String)? onLog;
 
   BackendService({this.onLog});
+
+  void _log(String message) {
+    final stamp = DateTime.now().toIso8601String();
+    final line = '[$stamp] $message';
+    _logs.add(line);
+    onLog?.call(line);
+    // Always print to terminal when available.
+    // ignore: avoid_print
+    print(line);
+    try {
+      _logSink ??= File(
+        '${Directory.current.path}${Platform.pathSeparator}backend_service.log',
+      ).openWrite(mode: FileMode.append);
+      _logSink!.writeln(line);
+      _logSink!.flush();
+    } catch (_) {}
+  }
 
   Future<void> startBackend() async {
     // 1. If socket is already connected, we are good.
@@ -26,7 +43,7 @@ class BackendService {
         8765,
         timeout: const Duration(milliseconds: 500),
       );
-      onLog?.call('Connected to existing backend');
+      _log('Connected to existing backend');
       _socket = s;
       _attachSocketListeners(s);
       return;
@@ -46,19 +63,19 @@ class BackendService {
           8765,
           timeout: const Duration(milliseconds: 1000),
         );
-        onLog?.call('Connected to backend socket');
+        _log('Connected to backend socket');
         _socket = s;
         _attachSocketListeners(s);
         return;
       } catch (_) {
-        onLog?.call('Waiting for backend socket...');
+        _log('Waiting for backend socket...');
       }
     }
     throw 'Failed to connect to backend socket after spawn';
   }
 
   Future<void> _spawnProcess() async {
-    onLog?.call('Current Directory: ${Directory.current.path}');
+    _log('Current Directory: ${Directory.current.path}');
 
     // Try to discover a project virtualenv by walking up the directory tree.
     final List<List<String>> candidates = [];
@@ -69,7 +86,7 @@ class BackendService {
       final backendPath =
           '${dir.path}${Platform.pathSeparator}backend${Platform.pathSeparator}backend_cli.py';
       if (File(venvPath).existsSync() && File(backendPath).existsSync()) {
-        onLog?.call('Discovered venv python: $venvPath');
+        _log('Discovered venv python: $venvPath');
         candidates.add([venvPath, backendPath]);
         break;
       }
@@ -93,9 +110,7 @@ class BackendService {
       try {
         final executable = cmd.first;
         final args = cmd.length > 1 ? cmd.sublist(1) : <String>[];
-        onLog?.call(
-          'Starting backend candidate: $executable ${args.join(' ')}',
-        );
+        _log('Starting backend candidate: $executable ${args.join(' ')}');
 
         // Check if executable exists if it's a relative path
         if (executable.contains(Platform.pathSeparator) ||
@@ -103,27 +118,42 @@ class BackendService {
             executable.contains('\\')) {
           final exists = await File(executable).exists();
           if (!exists) {
-            onLog?.call('Executable not found: $executable');
+            _log('Executable not found: $executable');
             continue;
           }
         }
+
+        // Compute a working directory so the backend can import project modules
+        var workDir = Directory.current.path;
+        try {
+          if (args.isNotEmpty) {
+            final candidate = File(args[0]);
+            if (candidate.existsSync()) {
+              // backend_cli.py is usually in <repo>/backend/backend_cli.py
+              // set working dir to repo root (parent of backend)
+              workDir = candidate.parent.parent.path;
+            } else if (candidate.absolute.existsSync()) {
+              workDir = candidate.absolute.parent.parent.path;
+            }
+          }
+        } catch (_) {}
+        _log('Using workingDirectory: $workDir');
 
         final proc = await Process.start(
           executable,
           args,
           runInShell: true,
           mode: ProcessStartMode.normal,
-          workingDirectory:
-              Directory.current.path, // ensure we are in frontend root
+          workingDirectory: workDir,
         );
 
         // Listen to stdout/stderr immediately to catch startup errors
         proc.stdout
             .transform(utf8.decoder)
-            .listen((line) => onLog?.call('[BACKEND OUT] $line'));
+            .listen((line) => _log('[BACKEND OUT] $line'));
         proc.stderr
             .transform(utf8.decoder)
-            .listen((line) => onLog?.call('[BACKEND ERR] $line'));
+            .listen((line) => _log('[BACKEND ERR] $line'));
 
         // Check if it crashes immediately (increased timeout)
         final exitCode = await proc.exitCode.timeout(
@@ -136,19 +166,19 @@ class BackendService {
           _proc = proc;
           // output listeners are already attached above, but we need to track exit
           proc.exitCode.then((code) {
-            onLog?.call('Backend exited with code $code');
+            _log('Backend exited with code $code');
             _proc = null;
             _socket?.destroy();
             _socket = null;
           });
-          onLog?.call('Backend process started successfully.');
+          _log('Backend process started successfully.');
           return;
         } else {
-          onLog?.call('Backend process exited immediately with code $exitCode');
+          _log('Backend process exited immediately with code $exitCode');
           _proc = null; // Clean up
         }
       } catch (e) {
-        onLog?.call('Failed to start candidate $cmd: $e');
+        _log('Failed to start candidate $cmd: $e');
       }
     }
     throw 'Could not spawn any backend candidate. Check logs for details.';
@@ -169,22 +199,22 @@ class BackendService {
           if (line.isEmpty) continue;
           try {
             final obj = json.decode(line);
-            onLog?.call('SOCK IN: ${obj}');
+            _log('SOCK IN: ${obj}');
             final id = obj['id'];
             if (id != null && _pending.containsKey(id)) {
               _pending.remove(id)!.complete(obj);
             }
           } catch (e) {
-            onLog?.call('SOCK PARSE ERR: $e');
+            _log('SOCK PARSE ERR: $e');
           }
         }
       },
       onDone: () {
-        onLog?.call('Socket closed');
+        _log('Socket closed');
         _socket = null;
       },
       onError: (e) {
-        onLog?.call('Socket error: $e');
+        _log('Socket error: $e');
         _socket = null;
       },
     );
@@ -198,7 +228,7 @@ class BackendService {
     _pending[id] = completer;
     final data = json.encode(msg) + '\n';
     _socket!.add(utf8.encode(data));
-    onLog?.call('SOCK OUT: $msg');
+    _log('SOCK OUT: $msg');
     return completer.future.timeout(const Duration(seconds: 5));
   }
 
@@ -217,6 +247,7 @@ class BackendService {
 
   void dispose() {
     stopBackend();
-    _outSub?.cancel();
+    _logSink?.flush();
+    _logSink?.close();
   }
 }
