@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'dart:io';
+import 'dart:async';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'services/backend_service.dart';
@@ -396,102 +397,180 @@ class _HomePageState extends State<HomePage> {
     final local = _localController.text;
     final mode = _mode.startsWith('rsync') ? 'rsync' : 'tar';
     _addBackupLog('Starting backup from $remote to $local with $mode');
-    try {
-      await _runBusy('Starting backup…', () async {
-        final res = await _backend.sendCommand('start_backup', {
-          'remote_path': remote,
-          'local_path': local,
-          'mode': mode,
-        });
-
-        if (res is Map && res.containsKey('error')) {
-          final err = res['error'];
-          _addBackupLog(
-            'Backend does not support start_backup: $err — using fallback',
-          );
-          await _downloadRecursive(remote, local);
-        } else {
-          _addBackupLog('Backup started: $res');
-        }
-      });
-    } catch (e) {
-      _addBackupLog('Backup failed to start: $e — attempting fallback');
-      try {
-        await _downloadRecursive(remote, local);
-      } catch (e2) {
-        _addBackupLog('Fallback failed: $e2');
-      }
-    }
-  }
-
-  Future<void> _downloadRecursive(String remotePath, String localDir) async {
-    _addBackupLog('Fallback: downloading $remotePath -> $localDir');
-    // ensure localDir exists
-    try {
-      final d = Directory(localDir);
-      if (!d.existsSync()) d.createSync(recursive: true);
-    } catch (_) {}
-
-    // Try to list directory on remote
-    try {
-      final listRes = await _backend.sendCommand('list_dir', {
-        'path': remotePath,
-      });
-      if (listRes is Map && listRes.containsKey('error')) {
-        // not a directory, attempt download file
-        final localFile =
-            '$localDir${Platform.pathSeparator}${remotePath.split('/').where((s) => s.isNotEmpty).toList().last}';
-        _addBackupLog('Downloading file $remotePath -> $localFile');
-        await _backend.sendCommand('download', {
-          'remote_path': remotePath,
-          'local_path': localFile,
-        });
-        _addBackupLog('Downloaded $remotePath');
-        return;
-      }
-
-      final entries = List<Map<String, dynamic>>.from(
-        listRes['result'].map(
-          (e) => {'name': e[0], 'is_dir': e[1], 'size': e[2]},
-        ),
+    if (remote.trim().isEmpty) {
+      _addBackupLog(
+        'Abort: remote path is empty. Select a folder to backup first.',
       );
+      return;
+    }
+    String remoteBaseName(String p) {
+      final parts = p.split('/').where((s) => s.trim().isNotEmpty).toList();
+      return parts.isEmpty ? 'backup' : parts.last;
+    }
 
-      for (final e in entries) {
-        final name = e['name'];
-        final isDir = e['is_dir'] as bool;
-        final childRemote = remotePath == '/' ? '/$name' : '$remotePath/$name';
-        final childLocal = '$localDir${Platform.pathSeparator}$name';
-        if (isDir) {
-          try {
-            final d = Directory(childLocal);
-            if (!d.existsSync()) d.createSync(recursive: true);
-          } catch (_) {}
-          await _downloadRecursive(childRemote, childLocal);
-        } else {
-          _addBackupLog('Downloading file $childRemote -> $childLocal');
-          try {
-            await _backend.sendCommand('download', {
-              'remote_path': childRemote,
-              'local_path': childLocal,
+    String joinLocalPath(String base, List<String> parts) {
+      var out = base;
+      for (final part in parts) {
+        if (part.trim().isEmpty) continue;
+        out = '$out${Platform.pathSeparator}$part';
+      }
+      return out;
+    }
+
+    String relativeRemotePath(String full, String root) {
+      var rel = full;
+      if (full.startsWith(root)) {
+        rel = full.substring(root.length);
+      }
+      while (rel.startsWith('/')) {
+        rel = rel.substring(1);
+      }
+      return rel.isEmpty ? remoteBaseName(full) : rel;
+    }
+
+    Future<List<Map<String, dynamic>>> collectFiles(
+      String root,
+      String current,
+    ) async {
+      try {
+        final listRes = await _backend.sendCommand('list_dir', {
+          'path': current,
+        });
+        if (listRes is Map && listRes.containsKey('error')) {
+          // Not a directory, treat as file
+          return [
+            {
+              'remote': current,
+              'rel': relativeRemotePath(current, root),
+              'size': 0,
+            },
+          ];
+        }
+
+        final entries = List<Map<String, dynamic>>.from(
+          listRes['result'].map(
+            (e) => {'name': e[0], 'is_dir': e[1], 'size': e[2]},
+          ),
+        );
+
+        final out = <Map<String, dynamic>>[];
+        for (final e in entries) {
+          final name = (e['name'] ?? '').toString();
+          final isDir = e['is_dir'] as bool;
+          final size = (e['size'] ?? 0) as num;
+          final childRemote = current == '/' ? '/$name' : '$current/$name';
+          if (isDir) {
+            out.addAll(await collectFiles(root, childRemote));
+          } else {
+            out.add({
+              'remote': childRemote,
+              'rel': relativeRemotePath(childRemote, root),
+              'size': size,
             });
-            _addBackupLog('Downloaded $childRemote');
-          } catch (e) {
-            _addBackupLog('Failed to download $childRemote: $e');
           }
         }
+        return out;
+      } catch (_) {
+        // If list_dir fails, treat as file
+        return [
+          {
+            'remote': current,
+            'rel': relativeRemotePath(current, root),
+            'size': 0,
+          },
+        ];
       }
-    } catch (e) {
-      // If list_dir failed, treat as file
-      final localFile =
-          '$localDir${Platform.pathSeparator}${remotePath.split('/').where((s) => s.isNotEmpty).toList().last}';
-      _addBackupLog(
-        'Downloading file $remotePath -> $localFile (list failed: $e)',
-      );
-      await _backend.sendCommand('download', {
-        'remote_path': remotePath,
-        'local_path': localFile,
+    }
+
+    try {
+      var actualLocal = local;
+      if (actualLocal.trim().isEmpty) {
+        // Default to a safe temporary directory
+        final d = await Directory.systemTemp.createTemp('servermgr_backup_');
+        actualLocal = d.path;
+        _localController.text = actualLocal;
+        _addBackupLog('Local path was empty — using temp dir: $actualLocal');
+      }
+
+      // Make sure the chosen local base exists
+      await Directory(actualLocal).create(recursive: true);
+
+      // Requirement (1): create folder with same name as remote directory
+      final localTargetDir = joinLocalPath(actualLocal, [
+        remoteBaseName(remote),
+      ]);
+      await Directory(localTargetDir).create(recursive: true);
+      _addBackupLog('Local target folder: $localTargetDir');
+
+      setState(() => _progress = 0.0);
+
+      await _runBusy('Downloading…', () async {
+        _addBackupLog('Scanning remote tree…');
+        final files = await collectFiles(remote, remote);
+        if (files.isEmpty) {
+          _addBackupLog('Nothing to download.');
+          setState(() => _progress = 100.0);
+          return;
+        }
+
+        final totalBytes = files
+            .map((f) => (f['size'] ?? 0) as num)
+            .where((s) => s > 0)
+            .fold<num>(0, (a, b) => a + b);
+        final totalFiles = files.length;
+        var doneFiles = 0;
+        num doneBytes = 0;
+
+        _addBackupLog('Downloading $totalFiles file(s)…');
+
+        for (final f in files) {
+          final remoteFile = (f['remote'] ?? '').toString();
+          final rel = (f['rel'] ?? '').toString();
+          final size = (f['size'] ?? 0) as num;
+
+          final relParts = rel
+              .split('/')
+              .where((s) => s.trim().isNotEmpty)
+              .toList();
+          final localFile = joinLocalPath(localTargetDir, relParts);
+
+          try {
+            await Directory(
+              File(localFile).parent.path,
+            ).create(recursive: true);
+          } catch (_) {}
+
+          final res = await _backend.sendCommand('download', {
+            'remote_path': remoteFile,
+            'local_path': localFile,
+          });
+
+          if (res is Map && res.containsKey('error')) {
+            _addBackupLog(
+              'Failed: $remoteFile -> $localFile : ${res['error']}',
+            );
+          } else {
+            doneFiles += 1;
+            doneBytes += size;
+          }
+
+          final pct = totalBytes > 0
+              ? (doneBytes / totalBytes) * 100.0
+              : (doneFiles / totalFiles) * 100.0;
+          if (mounted) {
+            setState(() => _progress = pct.clamp(0.0, 100.0));
+          }
+        }
+
+        if (mounted) {
+          setState(() => _progress = 100.0);
+        }
+        _addBackupLog(
+          'Done. Downloaded $doneFiles/$totalFiles file(s) into $localTargetDir',
+        );
       });
-      _addBackupLog('Downloaded $remotePath');
+    } catch (e) {
+      _addBackupLog('Backup failed: $e');
     }
   }
 
@@ -540,6 +619,28 @@ class _HomePageState extends State<HomePage> {
           Row(
             children: [
               NavigationRail(
+                leading: Padding(
+                  padding: const EdgeInsets.only(top: 12.0, bottom: 8.0),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: Image.asset(
+                          'assets/icon-b.png',
+                          width: 48,
+                          height: 48,
+                          fit: BoxFit.cover,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        'ServerBackup',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                ),
                 selectedIndex: _selectedIndex,
                 onDestinationSelected: (val) =>
                     setState(() => _selectedIndex = val),

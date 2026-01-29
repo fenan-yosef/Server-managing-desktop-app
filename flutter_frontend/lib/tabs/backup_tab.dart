@@ -120,11 +120,22 @@ class BackupTab extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 16),
-                  LinearProgressIndicator(
-                    value: progress / 100,
-                    minHeight: 8,
+                  ClipRRect(
                     borderRadius: BorderRadius.circular(4),
-                  ).animate(target: progress > 0 ? 1 : 0).shimmer(),
+                    child: TweenAnimationBuilder<double>(
+                      tween: Tween(
+                        begin: 0.0,
+                        end: (progress / 100).clamp(0.0, 1.0),
+                      ),
+                      duration: const Duration(milliseconds: 500),
+                      builder: (context, value, child) {
+                        return LinearProgressIndicator(
+                          value: value,
+                          minHeight: 8,
+                        );
+                      },
+                    ),
+                  ),
                   const SizedBox(height: 24),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.center,
