@@ -222,7 +222,7 @@ class _HomePageState extends State<HomePage> {
     final portC = TextEditingController(text: _portController.text);
     final userC = TextEditingController(text: _userController.text);
     final keyC = TextEditingController(text: _keyController.text);
-    final passC = TextEditingController();
+    final passC = TextEditingController(text: _passController.text);
     final labelC = TextEditingController();
 
     final confirmed = await showDialog<bool>(
@@ -924,6 +924,37 @@ class _HomePageState extends State<HomePage> {
       return;
     }
 
+    // Validate credentials per-server: require either password or key_path
+    final missing = <int>[];
+    for (var i = 0; i < servers.length; i++) {
+      final s = servers[i];
+      final pw = (s['password'] ?? '').toString().trim();
+      final key = (s['key_path'] ?? '').toString().trim();
+      if (pw.isEmpty && key.isEmpty) missing.add(i + 1);
+    }
+
+    if (missing.isNotEmpty) {
+      // Show dialog to user listing which servers are missing credentials
+      final listStr = missing.map((i) => 'Server #$i').join(', ');
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Missing Credentials'),
+          content: Text(
+            'The following servers are missing authentication (password or SSH key): $listStr.\n\nPlease edit the batch entries and provide a password or key before starting the backup.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
+      _addBackupLog('Batch aborted: missing credentials for $listStr');
+      return;
+    }
+
     var localRoot = _localController.text.trim();
     if (localRoot.isEmpty) {
       final d = await Directory.systemTemp.createTemp('servermgr_batch_');
@@ -931,6 +962,9 @@ class _HomePageState extends State<HomePage> {
       _localController.text = localRoot;
       _addBackupLog('Local path was empty — using temp dir: $localRoot');
     }
+
+    // Ensure backend is started before sending command
+    await _backend.startBackend();
 
     await _runBusy('Starting batch…', () async {
       try {
@@ -1192,6 +1226,7 @@ class _HomePageState extends State<HomePage> {
           backupLogs: _backupLogs,
           batchServers: _batchServers,
           recentLogins: _recentLogins,
+          jobs: _jobs,
           onModeChanged: (v) => setState(() => _mode = v),
           onBrowseLocal: _browseLocal,
           onStartBackup: _startBackup,

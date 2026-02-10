@@ -37,6 +37,7 @@ class BackupTab extends StatelessWidget {
   final List<String> backupLogs;
   final List<BackupServerConfig> batchServers;
   final List<LoginProfile> recentLogins;
+  final List<Map<String, dynamic>> jobs;
   final Function(String) onModeChanged;
   final Future<void> Function() onBrowseLocal;
   final Future<void> Function() onStartBackup;
@@ -62,6 +63,7 @@ class BackupTab extends StatelessWidget {
     required this.backupLogs,
     required this.batchServers,
     required this.recentLogins,
+    required this.jobs,
     required this.onModeChanged,
     required this.onBrowseLocal,
     required this.onStartBackup,
@@ -443,6 +445,41 @@ class BackupTab extends StatelessWidget {
               ),
             ),
           ).animate().fade(delay: 300.ms),
+          if (jobs.isNotEmpty) ...[
+            const SizedBox(height: 24),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(24.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Active Jobs',
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 16),
+                    ...jobs.map(
+                      (job) => Padding(
+                        padding: const EdgeInsets.only(bottom: 8.0),
+                        child: ListTile(
+                          title: Text(
+                            '${job['source']} → ${job['target_root']}',
+                          ),
+                          subtitle: Text(
+                            '${job['status']} - ${job['progress']}% - ${job['message']}',
+                          ),
+                          leading: CircularProgressIndicator(
+                            value: (job['progress'] as num).toDouble() / 100,
+                            strokeWidth: 2,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ).animate().fade(delay: 350.ms),
+          ],
           const SizedBox(height: 24),
 
           const Text('Console Log'),
