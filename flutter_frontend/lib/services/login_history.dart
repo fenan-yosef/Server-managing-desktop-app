@@ -8,6 +8,7 @@ class LoginProfile {
   final String username;
   final String keyPath;
   final DateTime lastUsed;
+  final String? customLabel;
 
   const LoginProfile({
     required this.host,
@@ -15,9 +16,13 @@ class LoginProfile {
     required this.username,
     required this.keyPath,
     required this.lastUsed,
+    this.customLabel,
   });
 
   String get label {
+    if (customLabel != null && customLabel!.trim().isNotEmpty) {
+      return customLabel!;
+    }
     final u = username.trim().isEmpty ? '?' : username.trim();
     final h = host.trim().isEmpty ? '?' : host.trim();
     return '$u@$h:$port';
@@ -29,6 +34,7 @@ class LoginProfile {
     'username': username,
     'keyPath': keyPath,
     'lastUsed': lastUsed.toIso8601String(),
+    'customLabel': customLabel,
   };
 
   static LoginProfile fromJson(Map<String, dynamic> json) {
@@ -40,6 +46,7 @@ class LoginProfile {
       lastUsed:
           DateTime.tryParse((json['lastUsed'] ?? '').toString()) ??
           DateTime.fromMillisecondsSinceEpoch(0),
+      customLabel: json['customLabel']?.toString(),
     );
   }
 
@@ -48,6 +55,24 @@ class LoginProfile {
         port == other.port &&
         username == other.username &&
         keyPath == other.keyPath;
+  }
+
+  LoginProfile copyWith({
+    String? host,
+    int? port,
+    String? username,
+    String? keyPath,
+    DateTime? lastUsed,
+    String? label,
+  }) {
+    return LoginProfile(
+      host: host ?? this.host,
+      port: port ?? this.port,
+      username: username ?? this.username,
+      keyPath: keyPath ?? this.keyPath,
+      lastUsed: lastUsed ?? this.lastUsed,
+      customLabel: label ?? customLabel,
+    );
   }
 }
 
@@ -86,6 +111,7 @@ class LoginHistoryStore {
     required int port,
     required String username,
     required String keyPath,
+    String? label,
   }) async {
     final next = List<LoginProfile>.from(current);
 
@@ -95,6 +121,7 @@ class LoginHistoryStore {
       username: username.trim(),
       keyPath: keyPath.trim(),
       lastUsed: DateTime.now(),
+      customLabel: label?.trim().isNotEmpty == true ? label!.trim() : null,
     );
 
     next.removeWhere((p) => p.matches(incoming));

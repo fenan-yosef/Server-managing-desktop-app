@@ -4,7 +4,6 @@ import 'dart:async';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'services/backend_service.dart';
-import 'tabs/login_tab.dart';
 import 'tabs/explorer_tab.dart';
 import 'tabs/backup_tab.dart';
 import 'tabs/jobs_tab.dart';
@@ -48,6 +47,9 @@ class _HomePageState extends State<HomePage> {
   String _mode = 'rsync (resumable)';
   double _progress = 0.0;
   final List<String> _backupLogs = [];
+  bool _obscurePasswordAdd = true;
+  bool _obscurePasswordEdit = true;
+  final List<BackupServerConfig> _batchServers = [];
 
   // Jobs
   List<Map<String, dynamic>> _jobs = [];
@@ -58,12 +60,326 @@ class _HomePageState extends State<HomePage> {
     _backend.onLog = (msg) => setState(() => _logs.add(msg));
     // Do not start backend here. It starts on 'Connect'.
     _loadRecentLogins();
+    _batchServers.add(_newServerConfig());
   }
 
   Future<void> _loadRecentLogins() async {
     final loaded = await _loginHistoryStore.load();
     if (!mounted) return;
     setState(() => _recentLogins = loaded);
+  }
+
+  BackupServerConfig _newServerConfig() {
+    return BackupServerConfig(
+      hostController: TextEditingController(text: _hostController.text),
+      portController: TextEditingController(text: _portController.text),
+      userController: TextEditingController(text: _userController.text),
+      passwordController: TextEditingController(),
+      keyController: TextEditingController(text: _keyController.text),
+      remotePathController: TextEditingController(text: '/'),
+    );
+  }
+
+  void _addBatchServer() {
+    _showServerDialog();
+  }
+
+  Future<void> _editBatchServer(int index) async {
+    if (index < 0 || index >= _batchServers.length) return;
+    final cfg = _batchServers[index];
+
+    final hostC = TextEditingController(text: cfg.hostController.text);
+    final portC = TextEditingController(text: cfg.portController.text);
+    final userC = TextEditingController(text: cfg.userController.text);
+    final keyC = TextEditingController(text: cfg.keyController.text);
+    final passC = TextEditingController(text: cfg.passwordController.text);
+    final remoteC = TextEditingController(text: cfg.remotePathController.text);
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => Center(
+        child: Card(
+          margin: const EdgeInsets.all(24),
+          child: Container(
+            width: 520,
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  'Edit Server',
+                  style: Theme.of(ctx).textTheme.headlineSmall,
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      flex: 3,
+                      child: TextField(
+                        controller: hostC,
+                        decoration: const InputDecoration(labelText: 'Host'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      flex: 1,
+                      child: TextField(
+                        controller: portC,
+                        decoration: const InputDecoration(labelText: 'Port'),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: userC,
+                  decoration: const InputDecoration(labelText: 'Username'),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: keyC,
+                        decoration: const InputDecoration(
+                          labelText: 'SSH Key (Optional)',
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton.filledTonal(
+                      onPressed: () => _browseKey(keyC),
+                      icon: const Icon(Icons.folder),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: passC,
+                  decoration: InputDecoration(
+                    labelText: 'Password (Optional)',
+                    suffixIcon: IconButton(
+                      onPressed: () => setState(
+                        () => _obscurePasswordEdit = !_obscurePasswordEdit,
+                      ),
+                      icon: Icon(
+                        _obscurePasswordEdit
+                            ? Icons.visibility
+                            : Icons.visibility_off,
+                      ),
+                    ),
+                  ),
+                  obscureText: _obscurePasswordEdit,
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: remoteC,
+                  decoration: const InputDecoration(labelText: 'Remote Path'),
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(ctx, false),
+                      child: const Text('Cancel'),
+                    ),
+                    const SizedBox(width: 8),
+                    FilledButton(
+                      onPressed: () => Navigator.pop(ctx, true),
+                      child: const Text('Save'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    if (confirmed == true) {
+      setState(() {
+        cfg.hostController.text = hostC.text;
+        cfg.portController.text = portC.text;
+        cfg.userController.text = userC.text;
+        cfg.keyController.text = keyC.text;
+        cfg.passwordController.text = passC.text;
+        cfg.remotePathController.text = remoteC.text;
+      });
+    }
+
+    hostC.dispose();
+    portC.dispose();
+    userC.dispose();
+    keyC.dispose();
+    passC.dispose();
+  }
+
+  Future<void> _showServerDialog() async {
+    final hostC = TextEditingController(text: _hostController.text);
+    final portC = TextEditingController(text: _portController.text);
+    final userC = TextEditingController(text: _userController.text);
+    final keyC = TextEditingController(text: _keyController.text);
+    final passC = TextEditingController();
+    final labelC = TextEditingController();
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => Center(
+        child: Card(
+          margin: const EdgeInsets.all(24),
+          child: Container(
+            width: 520,
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(
+                  'Add Server',
+                  style: Theme.of(ctx).textTheme.headlineSmall,
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: labelC,
+                  decoration: const InputDecoration(labelText: 'Profile Name'),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      flex: 3,
+                      child: TextField(
+                        controller: hostC,
+                        decoration: const InputDecoration(labelText: 'Host'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      flex: 1,
+                      child: TextField(
+                        controller: portC,
+                        decoration: const InputDecoration(labelText: 'Port'),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: userC,
+                  decoration: const InputDecoration(labelText: 'Username'),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: keyC,
+                        decoration: const InputDecoration(
+                          labelText: 'SSH Key (Optional)',
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton.filledTonal(
+                      onPressed: () => _browseKey(keyC),
+                      icon: const Icon(Icons.folder),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: passC,
+                  decoration: InputDecoration(
+                    labelText: 'Password (Optional)',
+                    suffixIcon: IconButton(
+                      onPressed: () => setState(
+                        () => _obscurePasswordAdd = !_obscurePasswordAdd,
+                      ),
+                      icon: Icon(
+                        _obscurePasswordAdd
+                            ? Icons.visibility
+                            : Icons.visibility_off,
+                      ),
+                    ),
+                  ),
+                  obscureText: _obscurePasswordAdd,
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(ctx, false),
+                      child: const Text('Cancel'),
+                    ),
+                    const SizedBox(width: 8),
+                    FilledButton(
+                      onPressed: () => Navigator.pop(ctx, true),
+                      child: const Text('Add'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    if (confirmed == true) {
+      final updated = await _loginHistoryStore.addOrUpdate(
+        _recentLogins,
+        host: hostC.text,
+        port: int.tryParse(portC.text) ?? 22,
+        username: userC.text,
+        keyPath: keyC.text,
+        label: labelC.text.isNotEmpty ? labelC.text : null,
+      );
+      if (!mounted) return;
+      setState(() => _recentLogins = updated);
+    } else {
+      hostC.dispose();
+      portC.dispose();
+      userC.dispose();
+      keyC.dispose();
+      passC.dispose();
+      labelC.dispose();
+    }
+  }
+
+  void _removeBatchServer(int index) {
+    if (index < 0 || index >= _batchServers.length) return;
+    final cfg = _batchServers.removeAt(index);
+    cfg.dispose();
+    setState(() {});
+  }
+
+  void _applySavedToBatchServer(int index, LoginProfile profile) {
+    if (index < 0 || index >= _batchServers.length) return;
+    final cfg = _batchServers[index];
+    setState(() {
+      cfg.hostController.text = profile.host;
+      cfg.portController.text = profile.port.toString();
+      cfg.userController.text = profile.username;
+      cfg.keyController.text = profile.keyPath;
+    });
+  }
+
+  Future<void> _saveBatchServerToHistory(int index) async {
+    if (index < 0 || index >= _batchServers.length) return;
+    final cfg = _batchServers[index];
+    final updated = await _loginHistoryStore.addOrUpdate(
+      _recentLogins,
+      host: cfg.hostController.text,
+      port: int.tryParse(cfg.portController.text) ?? 22,
+      username: cfg.userController.text,
+      keyPath: cfg.keyController.text,
+    );
+    if (!mounted) return;
+    setState(() => _recentLogins = updated);
   }
 
   Future<T> _runBusy<T>(String label, Future<T> Function() action) async {
@@ -95,6 +411,9 @@ class _HomePageState extends State<HomePage> {
     _pathController.dispose();
     _remoteController.dispose();
     _localController.dispose();
+    for (final cfg in _batchServers) {
+      cfg.dispose();
+    }
     _backend.dispose();
     super.dispose();
   }
@@ -133,9 +452,13 @@ class _HomePageState extends State<HomePage> {
           _recentLogins = updated;
           _loginStatus = 'Connected';
         });
+
+        // Automatically load the root directory after connecting
+        await _refreshExplorer();
       } catch (e) {
         setState(() {
           _loginStatus = 'Connection failed: $e';
+          _passController.clear(); // Clear password on failure for security
         });
       }
     });
@@ -240,6 +563,8 @@ class _HomePageState extends State<HomePage> {
     _portController.text = profile.port.toString();
     _userController.text = profile.username;
     _keyController.text = profile.keyPath;
+    _passController
+        .clear(); // Clear password for security - user must enter it each time
   }
 
   Future<void> _removeRecentLogin(LoginProfile profile) async {
@@ -574,6 +899,57 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  Future<void> _startMultiBackup() async {
+    final mode = _mode.startsWith('rsync') ? 'rsync' : 'tar';
+    final servers = _batchServers
+        .map(
+          (s) => {
+            'host': s.hostController.text.trim(),
+            'port': int.tryParse(s.portController.text.trim()) ?? 22,
+            'username': s.userController.text.trim(),
+            'password': s.passwordController.text,
+            'key_path': s.keyController.text,
+            'remote_path': s.remotePathController.text.trim(),
+          },
+        )
+        .where(
+          (m) =>
+              (m['host'] as String).isNotEmpty &&
+              (m['remote_path'] as String).isNotEmpty,
+        )
+        .toList();
+
+    if (servers.isEmpty) {
+      _addBackupLog('Add at least one server with host and remote path.');
+      return;
+    }
+
+    var localRoot = _localController.text.trim();
+    if (localRoot.isEmpty) {
+      final d = await Directory.systemTemp.createTemp('servermgr_batch_');
+      localRoot = d.path;
+      _localController.text = localRoot;
+      _addBackupLog('Local path was empty — using temp dir: $localRoot');
+    }
+
+    await _runBusy('Starting batch…', () async {
+      try {
+        final res = await _backend.sendCommand('multi_backup', {
+          'servers': servers,
+          'local_root': localRoot,
+          'mode': mode,
+        }, const Duration(hours: 8));
+        final result = (res is Map && res.containsKey('result'))
+            ? res['result']
+            : res;
+        _addBackupLog('Batch queued: $result');
+        await _refreshJobs();
+      } catch (e) {
+        _addBackupLog('Batch failed to start: $e');
+      }
+    });
+  }
+
   void _pauseBackup() {
     _addBackupLog('Pause not implemented');
   }
@@ -590,6 +966,13 @@ class _HomePageState extends State<HomePage> {
     setState(() {
       _backupLogs.add(msg);
     });
+  }
+
+  Future<void> _browseKey(TextEditingController controller) async {
+    final result = await FilePicker.platform.pickFiles();
+    if (result != null) {
+      controller.text = result.files.single.path!;
+    }
   }
 
   Future<void> _refreshJobs() async {
@@ -609,6 +992,36 @@ class _HomePageState extends State<HomePage> {
 
   void _deleteJob() {
     // TODO: implement
+  }
+
+  Future<void> _addSavedToBatch(int index) async {
+    if (index < 0 || index >= _recentLogins.length) return;
+    final p = _recentLogins[index];
+    final cfg = BackupServerConfig(
+      hostController: TextEditingController(text: p.host),
+      portController: TextEditingController(text: p.port.toString()),
+      userController: TextEditingController(text: p.username),
+      passwordController: TextEditingController(),
+      keyController: TextEditingController(text: p.keyPath),
+      remotePathController: TextEditingController(text: '/'),
+    );
+    setState(() {
+      _batchServers.add(cfg);
+    });
+  }
+
+  void _renameSavedProfile(int index, String newLabel) async {
+    if (index < 0 || index >= _recentLogins.length) return;
+    _recentLogins[index] = _recentLogins[index].copyWith(label: newLabel);
+    await _loginHistoryStore.save(_recentLogins);
+    setState(() {});
+  }
+
+  void _removeSavedProfile(int index) async {
+    if (index < 0 || index >= _recentLogins.length) return;
+    _recentLogins.removeAt(index);
+    await _loginHistoryStore.save(_recentLogins);
+    setState(() {});
   }
 
   @override
@@ -647,10 +1060,6 @@ class _HomePageState extends State<HomePage> {
                 labelType: NavigationRailLabelType.all,
                 backgroundColor: Theme.of(context).colorScheme.surface,
                 destinations: const [
-                  NavigationRailDestination(
-                    icon: Icon(Icons.login),
-                    label: Text('Connect'),
-                  ),
                   NavigationRailDestination(
                     icon: Icon(Icons.folder_open),
                     label: Text('Explorer'),
@@ -746,22 +1155,6 @@ class _HomePageState extends State<HomePage> {
   Widget _buildTabContent(int index) {
     switch (index) {
       case 0:
-        return LoginTab(
-          hostController: _hostController,
-          portController: _portController,
-          userController: _userController,
-          keyController: _keyController,
-          passController: _passController,
-          loginStatus: _loginStatus,
-          isBusy: _isBusy,
-          recentLogins: _recentLogins,
-          onSelectRecent: _applyRecentLogin,
-          onRemoveRecent: _removeRecentLogin,
-          onClearRecent: _clearRecentLogins,
-          onConnect: _connect,
-          onDisconnect: _disconnect,
-        );
-      case 1:
         return ExplorerTab(
           pathController: _pathController,
           explorerEntries: _explorerEntries,
@@ -776,22 +1169,46 @@ class _HomePageState extends State<HomePage> {
           onDownload: _download,
           onOpenExternal: _openFileExternal,
           onOpenInternal: _openFileInternal,
+          loginStatus: _loginStatus,
+          isBusy: _isBusy,
+          hostController: _hostController,
+          portController: _portController,
+          userController: _userController,
+          keyController: _keyController,
+          passController: _passController,
+          recentLogins: _recentLogins,
+          onSelectRecent: _applyRecentLogin,
+          onRemoveRecent: _removeRecentLogin,
+          onClearRecent: _clearRecentLogins,
+          onConnect: _connect,
+          onDisconnect: _disconnect,
         );
-      case 2:
+      case 1:
         return BackupTab(
           remoteController: _remoteController,
           localController: _localController,
           mode: _mode,
           progress: _progress,
           backupLogs: _backupLogs,
+          batchServers: _batchServers,
+          recentLogins: _recentLogins,
           onModeChanged: (v) => setState(() => _mode = v),
           onBrowseLocal: _browseLocal,
           onStartBackup: _startBackup,
+          onStartMultiBackup: _startMultiBackup,
+          onAddServer: _addBatchServer,
+          onRemoveServer: _removeBatchServer,
+          onSelectSavedProfile: _applySavedToBatchServer,
+          onSaveServer: _saveBatchServerToHistory,
+          onEditServer: _editBatchServer,
+          onAddSavedProfile: _addSavedToBatch,
+          onRenameSavedProfile: _renameSavedProfile,
+          onRemoveSavedProfile: _removeSavedProfile,
           onPauseBackup: _pauseBackup,
           onResumeBackup: _resumeBackup,
           onCancelBackup: _cancelBackup,
         );
-      case 3:
+      case 2:
         return JobsTab(
           jobs: _jobs,
           onRefreshJobs: _refreshJobs,

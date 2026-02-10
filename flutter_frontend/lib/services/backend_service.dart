@@ -199,7 +199,7 @@ class BackendService {
           if (line.isEmpty) continue;
           try {
             final obj = json.decode(line);
-            _log('SOCK IN: ${obj}');
+            _log('SOCK IN: $obj');
             final id = obj['id'];
             if (id != null && _pending.containsKey(id)) {
               _pending.remove(id)!.complete(obj);
@@ -220,16 +220,21 @@ class BackendService {
     );
   }
 
-  Future<dynamic> sendCommand(String cmd, [dynamic params]) async {
+  Future<dynamic> sendCommand(
+    String cmd, [
+    dynamic params,
+    Duration timeout = const Duration(seconds: 5),
+  ]) async {
     if (_socket == null) throw 'no socket';
     final id = _nextId++;
     final msg = {'id': id, 'cmd': cmd, 'params': params};
     final completer = Completer<dynamic>();
     _pending[id] = completer;
-    final data = json.encode(msg) + '\n';
+    final data = '${json.encode(msg)}\n';
     _socket!.add(utf8.encode(data));
     _log('SOCK OUT: $msg');
-    return completer.future.timeout(const Duration(seconds: 5));
+    // Allow long-running commands to opt into a longer timeout.
+    return completer.future.timeout(timeout);
   }
 
   Future<void> stopBackend() async {

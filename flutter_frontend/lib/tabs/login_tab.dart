@@ -3,7 +3,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import '../services/login_history.dart';
 
-class LoginTab extends StatelessWidget {
+class LoginTab extends StatefulWidget {
   final TextEditingController hostController;
   final TextEditingController portController;
   final TextEditingController userController;
@@ -35,10 +35,17 @@ class LoginTab extends StatelessWidget {
     required this.onDisconnect,
   });
 
+  @override
+  State<LoginTab> createState() => _LoginTabState();
+}
+
+class _LoginTabState extends State<LoginTab> {
+  bool _obscurePassword = true;
+
   Future<void> _browseKey() async {
     final result = await FilePicker.platform.pickFiles();
     if (result != null) {
-      keyController.text = result.files.single.path!;
+      widget.keyController.text = result.files.single.path!;
     }
   }
 
@@ -60,7 +67,7 @@ class LoginTab extends StatelessWidget {
                 textAlign: TextAlign.center,
               ).animate().fade().moveY(begin: -10, end: 0),
               const SizedBox(height: 16),
-              if (recentLogins.isNotEmpty) ...[
+              if (widget.recentLogins.isNotEmpty) ...[
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
@@ -69,7 +76,7 @@ class LoginTab extends StatelessWidget {
                       style: Theme.of(context).textTheme.bodyLarge,
                     ),
                     TextButton(
-                      onPressed: onClearRecent,
+                      onPressed: widget.onClearRecent,
                       child: const Text('Clear'),
                     ),
                   ],
@@ -78,11 +85,11 @@ class LoginTab extends StatelessWidget {
                 Wrap(
                   spacing: 8,
                   runSpacing: 8,
-                  children: recentLogins.map((p) {
+                  children: widget.recentLogins.map((p) {
                     return InputChip(
                       label: Text(p.label),
-                      onPressed: () => onSelectRecent(p),
-                      onDeleted: () => onRemoveRecent(p),
+                      onPressed: () => widget.onSelectRecent(p),
+                      onDeleted: () => widget.onRemoveRecent(p),
                     );
                   }).toList(),
                 ),
@@ -94,7 +101,7 @@ class LoginTab extends StatelessWidget {
                   Expanded(
                     flex: 3,
                     child: TextField(
-                      controller: hostController,
+                      controller: widget.hostController,
                       decoration: const InputDecoration(
                         labelText: 'Host',
                         prefixIcon: Icon(Icons.dns),
@@ -105,7 +112,7 @@ class LoginTab extends StatelessWidget {
                   Expanded(
                     flex: 1,
                     child: TextField(
-                      controller: portController,
+                      controller: widget.portController,
                       decoration: const InputDecoration(labelText: 'Port'),
                       keyboardType: TextInputType.number,
                     ),
@@ -114,7 +121,7 @@ class LoginTab extends StatelessWidget {
               ).animate().fade(delay: 100.ms).moveX(begin: -10, end: 0),
               const SizedBox(height: 16),
               TextField(
-                controller: userController,
+                controller: widget.userController,
                 decoration: const InputDecoration(
                   labelText: 'Username',
                   prefixIcon: Icon(Icons.person),
@@ -125,7 +132,7 @@ class LoginTab extends StatelessWidget {
                 children: [
                   Expanded(
                     child: TextField(
-                      controller: keyController,
+                      controller: widget.keyController,
                       decoration: const InputDecoration(
                         labelText: 'SSH Key (Optional)',
                         prefixIcon: Icon(Icons.vpn_key),
@@ -141,21 +148,30 @@ class LoginTab extends StatelessWidget {
               ).animate().fade(delay: 300.ms).moveX(begin: -10, end: 0),
               const SizedBox(height: 16),
               TextField(
-                controller: passController,
-                decoration: const InputDecoration(
+                controller: widget.passController,
+                decoration: InputDecoration(
                   labelText: 'Password',
-                  prefixIcon: Icon(Icons.password),
+                  prefixIcon: const Icon(Icons.password),
+                  suffixIcon: IconButton(
+                    onPressed: () =>
+                        setState(() => _obscurePassword = !_obscurePassword),
+                    icon: Icon(
+                      _obscurePassword
+                          ? Icons.visibility
+                          : Icons.visibility_off,
+                    ),
+                  ),
                 ),
-                obscureText: true,
+                obscureText: _obscurePassword,
               ).animate().fade(delay: 400.ms).moveX(begin: -10, end: 0),
               const SizedBox(height: 32),
               Row(
                 children: [
                   Expanded(
                     child: FilledButton.icon(
-                      onPressed: isBusy ? null : onConnect,
+                      onPressed: widget.isBusy ? null : widget.onConnect,
                       icon: const Icon(Icons.login),
-                      label: isBusy
+                      label: widget.isBusy
                           ? const SizedBox(
                               width: 16,
                               height: 16,
@@ -164,14 +180,14 @@ class LoginTab extends StatelessWidget {
                           : const Text('Connect'),
                     ),
                   ),
-                  if (loginStatus == 'Connected') ...[
+                  if (widget.loginStatus == 'Connected') ...[
                     const SizedBox(width: 16),
                     Expanded(
                       child: FilledButton.icon(
                         style: FilledButton.styleFrom(
                           backgroundColor: Theme.of(context).colorScheme.error,
                         ),
-                        onPressed: isBusy ? null : onDisconnect,
+                        onPressed: widget.isBusy ? null : widget.onDisconnect,
                         icon: const Icon(Icons.logout),
                         label: const Text('Disconnect'),
                       ),
@@ -182,9 +198,9 @@ class LoginTab extends StatelessWidget {
               const SizedBox(height: 16),
               Center(
                 child: Text(
-                  loginStatus,
+                  widget.loginStatus,
                   style: TextStyle(
-                    color: loginStatus == 'Connected'
+                    color: widget.loginStatus == 'Connected'
                         ? Colors.greenAccent
                         : Colors.grey,
                   ),
