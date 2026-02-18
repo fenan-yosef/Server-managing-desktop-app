@@ -50,6 +50,7 @@ class _HomePageState extends State<HomePage> {
   bool _obscurePasswordAdd = true;
   bool _obscurePasswordEdit = true;
   final List<BackupServerConfig> _batchServers = [];
+  int _perHostLimit = 1;
 
   // Jobs
   List<Map<String, dynamic>> _jobs = [];
@@ -335,6 +336,7 @@ class _HomePageState extends State<HomePage> {
         host: hostC.text,
         port: int.tryParse(portC.text) ?? 22,
         username: userC.text,
+        password: passC.text,
         keyPath: keyC.text,
         label: labelC.text.isNotEmpty ? labelC.text : null,
       );
@@ -364,6 +366,7 @@ class _HomePageState extends State<HomePage> {
       cfg.hostController.text = profile.host;
       cfg.portController.text = profile.port.toString();
       cfg.userController.text = profile.username;
+      cfg.passwordController.text = profile.password ?? '';
       cfg.keyController.text = profile.keyPath;
     });
   }
@@ -376,6 +379,7 @@ class _HomePageState extends State<HomePage> {
       host: cfg.hostController.text,
       port: int.tryParse(cfg.portController.text) ?? 22,
       username: cfg.userController.text,
+      password: cfg.passwordController.text,
       keyPath: cfg.keyController.text,
     );
     if (!mounted) return;
@@ -432,19 +436,24 @@ class _HomePageState extends State<HomePage> {
         final pass = _passController.text;
         final key = _keyController.text;
 
-        await _backend.sendCommand('connect', {
+        final connRes = await _backend.sendCommand('connect', {
           'host': host,
           'port': port,
           'username': user,
           'key_path': key,
           'password': pass,
         });
+        // Backend may return an object with an 'error' key; treat that as failure
+        if (connRes is Map && connRes.containsKey('error')) {
+          throw connRes['error'] ?? 'connection error';
+        }
 
         final updated = await _loginHistoryStore.addOrUpdate(
           _recentLogins,
           host: host,
           port: port,
           username: user,
+          password: pass,
           keyPath: key,
         );
 
@@ -456,8 +465,24 @@ class _HomePageState extends State<HomePage> {
         // Automatically load the root directory after connecting
         await _refreshExplorer();
       } catch (e) {
+        // Show a dialog with the connection error so the user can't continue silently
+        try {
+          await showDialog<void>(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              title: const Text('Connection Failed'),
+              content: Text(e.toString()),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('OK'),
+                ),
+              ],
+            ),
+          );
+        } catch (_) {}
         setState(() {
-          _loginStatus = 'Connection failed: $e';
+          _loginStatus = 'Disconnected';
           _passController.clear(); // Clear password on failure for security
         });
       }
@@ -563,8 +588,7 @@ class _HomePageState extends State<HomePage> {
     _portController.text = profile.port.toString();
     _userController.text = profile.username;
     _keyController.text = profile.keyPath;
-    _passController
-        .clear(); // Clear password for security - user must enter it each time
+    _passController.text = profile.password ?? '';
   }
 
   Future<void> _removeRecentLogin(LoginProfile profile) async {
@@ -972,11 +996,18 @@ class _HomePageState extends State<HomePage> {
           'servers': servers,
           'local_root': localRoot,
           'mode': mode,
+          'per_host_limit': _perHostLimit,
         }, const Duration(hours: 8));
         final result = (res is Map && res.containsKey('result'))
             ? res['result']
             : res;
         _addBackupLog('Batch queued: $result');
+        // If backend returned connect instrumentation, log it
+        try {
+          if (result is Map && result.containsKey('connect_stats')) {
+            _addBackupLog('Connect stats: ${result['connect_stats']}');
+          }
+        } catch (_) {}
         await _refreshJobs();
       } catch (e) {
         _addBackupLog('Batch failed to start: $e');
@@ -1035,7 +1066,7 @@ class _HomePageState extends State<HomePage> {
       hostController: TextEditingController(text: p.host),
       portController: TextEditingController(text: p.port.toString()),
       userController: TextEditingController(text: p.username),
-      passwordController: TextEditingController(),
+      passwordController: TextEditingController(text: p.password ?? ''),
       keyController: TextEditingController(text: p.keyPath),
       remotePathController: TextEditingController(text: '/'),
     );
@@ -1231,6 +1262,8 @@ class _HomePageState extends State<HomePage> {
           onBrowseLocal: _browseLocal,
           onStartBackup: _startBackup,
           onStartMultiBackup: _startMultiBackup,
+          perHostLimit: _perHostLimit,
+          onPerHostLimitChanged: (v) => setState(() => _perHostLimit = v),
           onAddServer: _addBatchServer,
           onRemoveServer: _removeBatchServer,
           onSelectSavedProfile: _applySavedToBatchServer,

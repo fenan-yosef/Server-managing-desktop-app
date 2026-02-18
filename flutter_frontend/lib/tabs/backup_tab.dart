@@ -38,6 +38,8 @@ class BackupTab extends StatelessWidget {
   final List<BackupServerConfig> batchServers;
   final List<LoginProfile> recentLogins;
   final List<Map<String, dynamic>> jobs;
+  final int perHostLimit;
+  final void Function(int) onPerHostLimitChanged;
   final Function(String) onModeChanged;
   final Future<void> Function() onBrowseLocal;
   final Future<void> Function() onStartBackup;
@@ -68,6 +70,8 @@ class BackupTab extends StatelessWidget {
     required this.onBrowseLocal,
     required this.onStartBackup,
     required this.onStartMultiBackup,
+    required this.perHostLimit,
+    required this.onPerHostLimitChanged,
     required this.onAddServer,
     required this.onRemoveServer,
     required this.onSelectSavedProfile,
@@ -156,6 +160,26 @@ class BackupTab extends StatelessWidget {
                       ),
                     ],
                   ).animate().fade(delay: 100.ms).moveX(),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      SizedBox(
+                        width: 220,
+                        child: TextFormField(
+                          initialValue: perHostLimit.toString(),
+                          decoration: const InputDecoration(
+                            labelText: 'Per-host concurrency',
+                            helperText: 'Connections per host',
+                          ),
+                          keyboardType: TextInputType.number,
+                          onChanged: (v) {
+                            final n = int.tryParse(v) ?? 1;
+                            onPerHostLimitChanged(n);
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
                   const SizedBox(height: 16),
                   const Text('Backup Mode'),
                   const SizedBox(height: 8),

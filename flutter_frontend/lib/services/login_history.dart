@@ -6,6 +6,7 @@ class LoginProfile {
   final String host;
   final int port;
   final String username;
+  final String? password;
   final String keyPath;
   final DateTime lastUsed;
   final String? customLabel;
@@ -14,6 +15,7 @@ class LoginProfile {
     required this.host,
     required this.port,
     required this.username,
+    this.password,
     required this.keyPath,
     required this.lastUsed,
     this.customLabel,
@@ -32,6 +34,7 @@ class LoginProfile {
     'host': host,
     'port': port,
     'username': username,
+    'password': password,
     'keyPath': keyPath,
     'lastUsed': lastUsed.toIso8601String(),
     'customLabel': customLabel,
@@ -42,6 +45,9 @@ class LoginProfile {
       host: (json['host'] ?? '').toString(),
       port: int.tryParse((json['port'] ?? 22).toString()) ?? 22,
       username: (json['username'] ?? '').toString(),
+      password: json.containsKey('password')
+          ? (json['password']?.toString())
+          : null,
       keyPath: (json['keyPath'] ?? '').toString(),
       lastUsed:
           DateTime.tryParse((json['lastUsed'] ?? '').toString()) ??
@@ -61,6 +67,7 @@ class LoginProfile {
     String? host,
     int? port,
     String? username,
+    String? password,
     String? keyPath,
     DateTime? lastUsed,
     String? label,
@@ -69,6 +76,7 @@ class LoginProfile {
       host: host ?? this.host,
       port: port ?? this.port,
       username: username ?? this.username,
+      password: password ?? this.password,
       keyPath: keyPath ?? this.keyPath,
       lastUsed: lastUsed ?? this.lastUsed,
       customLabel: label ?? customLabel,
@@ -110,6 +118,7 @@ class LoginHistoryStore {
     required String host,
     required int port,
     required String username,
+    required String password,
     required String keyPath,
     String? label,
   }) async {
@@ -119,6 +128,7 @@ class LoginHistoryStore {
       host: host.trim(),
       port: port,
       username: username.trim(),
+      password: password,
       keyPath: keyPath.trim(),
       lastUsed: DateTime.now(),
       customLabel: label?.trim().isNotEmpty == true ? label!.trim() : null,

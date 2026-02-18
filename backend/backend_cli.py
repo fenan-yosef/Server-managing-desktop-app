@@ -14,6 +14,7 @@ import threading
 import json
 import tempfile
 import uuid
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -23,6 +24,25 @@ from app import SSHManager, JobStore, ExplorerModel, Job
 ssh = SSHManager()
 store = JobStore(Path("app.db"))
 explorer = None
+
+# Limit concurrency so we don't bombard remote servers when running large batches.
+# Tune this value as appropriate for your environment.
+MAX_PARALLEL_BACKUPS = 4
+_backup_semaphore = threading.Semaphore(MAX_PARALLEL_BACKUPS)
+# Per-server locks to serialize connect attempts to the same target
+_server_locks = {}
+_server_locks_lock = threading.Lock()
+
+# Persistent per-host managers to avoid reconnecting for every job.
+_persistent_managers = {}
+_manager_connected = set()
+_persistent_managers_lock = threading.Lock()
+_per_host_semaphores = {}
+_per_host_semaphores_lock = threading.Lock()
+
+# Connect instrumentation
+_connect_stats = {}
+_connect_stats_lock = threading.Lock()
 
 
 def _make_job(job_id: str, source: str, target_root: str, status: str, phase: str, progress: int, message: str, mode: str) -> Job:
@@ -39,7 +59,7 @@ def _make_job(job_id: str, source: str, target_root: str, status: str, phase: st
     )
 
 
-def _run_single_batch(job_id: str, server: dict, local_root: Path, mode: str, store: JobStore) -> str:
+def _run_single_batch(job_id: str, server: dict, local_root: Path, mode: str, store: JobStore, per_host_limit: int = 1) -> str:
     host = server.get("host", "")
     port = int(server.get("port", 22))
     username = server.get("username", "")
@@ -50,9 +70,73 @@ def _run_single_batch(job_id: str, server: dict, local_root: Path, mode: str, st
     initial_job = _make_job(job_id, remote_path, str(local_root), "running", "connect", 1, "Starting", mode)
     store.upsert(initial_job)
 
-    mgr = SSHManager()
+    # Acquire global semaphore to limit overall parallelism
+    _backup_semaphore.acquire()
+
+    # Compose a key to identify this target server (includes username/port/key)
+    host_key = f"{username}@{host}:{port}:{key_path or ''}"
+
+    # Ensure we have a persistent manager for this host_key
+    with _persistent_managers_lock:
+        mgr = _persistent_managers.get(host_key)
+        if mgr is None:
+            mgr = SSHManager()
+            _persistent_managers[host_key] = mgr
+
+    # Ensure there's a per-host lock to serialize access to the persistent manager
+    with _server_locks_lock:
+        lock = _server_locks.get(host_key)
+        if lock is None:
+            lock = threading.Lock()
+            _server_locks[host_key] = lock
+
+    # Ensure a per-host semaphore exists (to limit concurrency per host)
+    with _per_host_semaphores_lock:
+        sem = _per_host_semaphores.get(host_key)
+        if sem is None:
+            sem = threading.Semaphore(per_host_limit)
+            _per_host_semaphores[host_key] = sem
+
+    auth_failed = False
+    # Acquire per-host slot
+    sem.acquire()
     try:
-        mgr.connect(host, port, username, key_path, password)
+        # Use the per-host lock to serialize connect and operations on the shared manager
+        with lock:
+            # Connect only once for the persistent manager; if not connected, attempt to connect with retries
+            need_connect = False
+            with _persistent_managers_lock:
+                if host_key not in _manager_connected:
+                    need_connect = True
+
+            if need_connect:
+                connect_err = None
+                for attempt in range(1, 4):
+                    # record attempt
+                    with _connect_stats_lock:
+                        stats = _connect_stats.setdefault(host_key, {'attempts': 0, 'success': 0, 'failure': 0})
+                        stats['attempts'] += 1
+                    try:
+                        mgr.connect(host, port, username, key_path, password)
+                        # record success
+                        with _connect_stats_lock:
+                            stats['success'] += 1
+                        connect_err = None
+                        break
+                    except Exception as e:
+                        # record failure
+                        with _connect_stats_lock:
+                            stats['failure'] += 1
+                        connect_err = e
+                        if attempt < 3:
+                            time.sleep(0.5 * (2 ** (attempt - 1)))
+                if connect_err:
+                    # mark failure to allow cleanup logic below
+                    raise connect_err
+                # mark manager as connected for reuse
+                with _persistent_managers_lock:
+                    _manager_connected.add(host_key)
+
         job = _make_job(job_id, remote_path, str(local_root), "running", "tar", 10, "Connected", mode)
         store.upsert(job)
 
@@ -65,13 +149,18 @@ def _run_single_batch(job_id: str, server: dict, local_root: Path, mode: str, st
         job = _make_job(job_id, remote_path, str(local_root), "running", "download", 30, "Downloading archive", mode)
         store.upsert(job)
 
+        # Ensure destination subfolder per host exists and use it for the archive
         local_root.mkdir(parents=True, exist_ok=True)
+        # sanitize host for filesystem
+        sanitized_host = host.replace('/', '_').replace('\\', '_').replace(':', '_')
+        host_dir = local_root / sanitized_host
+        host_dir.mkdir(parents=True, exist_ok=True)
         remote_size = 0
         sftp = mgr.open_sftp()
         try:
             remote_size = sftp.stat(remote_tmp).st_size
-            dest_name = f"{host.replace(' ', '_')}-{Path(remote_path).name or 'backup'}-{job_id[:8]}.tar.gz"
-            local_path = local_root / dest_name
+            filename = f"{Path(remote_path).name or 'backup'}-{job_id[:8]}.tar.gz"
+            local_path = host_dir / filename
             with sftp.open(remote_tmp, "rb") as src, local_path.open("wb") as dst:
                 transferred = 0
                 while True:
@@ -101,9 +190,35 @@ def _run_single_batch(job_id: str, server: dict, local_root: Path, mode: str, st
     except Exception as exc:  # noqa: BLE001
         fail_job = _make_job(job_id, remote_path, str(local_root), "failed", "error", 0, str(exc), mode)
         store.upsert(fail_job)
+        # Detect authentication-related failures so we can discard the persistent manager
+        et = str(exc).lower()
+        if 'auth' in et or 'authentication' in et or 'permission denied' in et:
+            auth_failed = True
+        else:
+            auth_failed = False
     finally:
         try:
-            mgr.disconnect()
+            if auth_failed:
+                try:
+                    mgr.disconnect()
+                except Exception:
+                    pass
+                with _persistent_managers_lock:
+                    try:
+                        del _persistent_managers[host_key]
+                    except Exception:
+                        pass
+                    _manager_connected.discard(host_key)
+        except Exception:
+            pass
+        # Release per-host slot
+        try:
+            sem.release()
+        except Exception:
+            pass
+        # Release our global semaphore permit
+        try:
+            _backup_semaphore.release()
         except Exception:
             pass
 
@@ -282,6 +397,7 @@ class JSONSocketHandler(threading.Thread):
                     elif cmd == "multi_backup":
                         servers = pget("servers", []) or []
                         mode = pget("mode", "tar")
+                        per_host_limit = int(pget("per_host_limit", 1) or 1)
                         local_root = pget("local_root") or tempfile.mkdtemp(prefix="servermgr_batch_")
                         local_root_path = Path(local_root)
                         if not servers:
@@ -292,12 +408,15 @@ class JSONSocketHandler(threading.Thread):
                                 job_id = str(uuid.uuid4())
                                 t = threading.Thread(
                                     target=_run_single_batch,
-                                    args=(job_id, server, local_root_path, mode, store),
+                                    args=(job_id, server, local_root_path, mode, store, per_host_limit),
                                     daemon=True,
                                 )
                                 t.start()
                                 jobs.append({"job_id": job_id, "host": server.get("host"), "remote_path": server.get("remote_path")})
-                            self.send_json({"id": req_id, "result": {"jobs": jobs, "local_root": str(local_root_path)}})
+                            # include current connect stats snapshot for instrumentation
+                            with _connect_stats_lock:
+                                stats_snapshot = {k: v.copy() for k, v in _connect_stats.items()}
+                            self.send_json({"id": req_id, "result": {"jobs": jobs, "local_root": str(local_root_path), "connect_stats": stats_snapshot}})
                     elif cmd == "list_jobs":
                         jobs = store.list_jobs()
                         result = [{"job_id": j.job_id, "source": j.source, "target_root": j.target_root, "status": j.status, "phase": j.phase, "progress": j.progress, "can_resume": j.can_resume, "message": j.message, "mode": j.mode} for j in jobs]
