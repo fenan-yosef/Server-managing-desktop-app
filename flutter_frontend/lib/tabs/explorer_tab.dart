@@ -15,8 +15,8 @@ class ExplorerTab extends StatefulWidget {
   final Function(Map<String, dynamic>) onSelectEntry;
   final VoidCallback onUseForBackup;
   final Future<void> Function() onMkdir;
-  final Future<void> Function() onRename;
-  final Future<void> Function() onDelete;
+  final Future<void> Function(Map<String, dynamic>) onRename;
+  final Future<void> Function(List<Map<String, dynamic>>) onDelete;
   final Future<void> Function() onUpload;
   final Future<void> Function() onDownload;
   final Future<void> Function(String) onOpenExternal;
@@ -76,8 +76,130 @@ class _ExplorerTabState extends State<ExplorerTab> {
   ExplorerSortBy _sortBy = ExplorerSortBy.name;
   bool _ascending = true;
   bool _obscurePassword = true;
+  final Set<String> _selectedPaths = <String>{};
 
   List<Map<String, dynamic>> get _entries => widget.explorerEntries;
+
+  String _entryRemotePath(Map<String, dynamic> entry) {
+    final name = (entry['name'] ?? '').toString();
+    final base = widget.pathController.text.trim();
+    if (base.isEmpty || base == '/') return '/$name';
+    return '$base/$name';
+  }
+
+  bool _isSelected(Map<String, dynamic> entry) {
+    return _selectedPaths.contains(_entryRemotePath(entry));
+  }
+
+  void _toggleSelected(Map<String, dynamic> entry, bool selected) {
+    final path = _entryRemotePath(entry);
+    setState(() {
+      if (selected) {
+        _selectedPaths.add(path);
+      } else {
+        _selectedPaths.remove(path);
+      }
+    });
+  }
+
+  List<Map<String, dynamic>> _selectedEntries(List<Map<String, dynamic>> entries) {
+    return entries.where((e) => _selectedPaths.contains(_entryRemotePath(e))).toList();
+  }
+
+  Future<void> _handleRenameSelected(List<Map<String, dynamic>> entries) async {
+    final selected = _selectedEntries(entries);
+    if (selected.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Select one file or folder to rename.')),
+      );
+      return;
+    }
+    if (selected.length > 1) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Rename supports only one selected item at a time.')),
+      );
+      return;
+    }
+    try {
+      await widget.onRename(selected.first);
+      setState(() {
+        _selectedPaths
+          ..clear();
+      });
+    } catch (e) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Rename failed: $e')));
+    }
+  }
+
+  Future<void> _handleDeleteSelected(List<Map<String, dynamic>> entries) async {
+    final selected = _selectedEntries(entries);
+    if (selected.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Select one or more files/folders to delete.')),
+      );
+      return;
+    }
+
+    final names = selected
+        .map((e) => (e['name'] ?? '').toString())
+        .where((n) => n.trim().isNotEmpty)
+        .toList();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Delete ${names.length} item(s)?'),
+        content: SizedBox(
+          width: 520,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('The following items will be deleted:'),
+              const SizedBox(height: 10),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 220),
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: names
+                        .map((n) => Text('• $n', overflow: TextOverflow.ellipsis))
+                        .toList(),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    try {
+      await widget.onDelete(selected);
+      setState(() {
+        for (final e in selected) {
+          _selectedPaths.remove(_entryRemotePath(e));
+        }
+      });
+    } catch (e) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Delete failed: $e')));
+    }
+  }
 
   Future<void> _browseKey() async {
     final result = await FilePicker.platform.pickFiles();
@@ -118,7 +240,8 @@ class _ExplorerTabState extends State<ExplorerTab> {
   @override
   void didUpdateWidget(covariant ExplorerTab oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // nothing for now — entries read from widget
+    final validPaths = _entries.map(_entryRemotePath).toSet();
+    _selectedPaths.removeWhere((p) => !validPaths.contains(p));
   }
 
   Widget _buildTopControls(BuildContext context) {
@@ -458,20 +581,37 @@ class _ExplorerTabState extends State<ExplorerTab> {
                               }
                             },
                             child: Card(
-                              child: Column(
-                                mainAxisAlignment: MainAxisAlignment.center,
+                              child: Stack(
                                 children: [
-                                  Icon(
-                                    isDir
-                                        ? Icons.folder
-                                        : Icons.insert_drive_file,
-                                    size: 36,
-                                    color: isDir ? Colors.amber : Colors.blue,
+                                  Center(
+                                    child: Column(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: [
+                                        Icon(
+                                          isDir
+                                              ? Icons.folder
+                                              : Icons.insert_drive_file,
+                                          size: 36,
+                                          color: isDir
+                                              ? Colors.amber
+                                              : Colors.blue,
+                                        ),
+                                        const SizedBox(height: 8),
+                                        Text(
+                                          e['name'],
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ],
+                                    ),
                                   ),
-                                  const SizedBox(height: 8),
-                                  Text(
-                                    e['name'],
-                                    overflow: TextOverflow.ellipsis,
+                                  Positioned(
+                                    right: 4,
+                                    top: 4,
+                                    child: Checkbox(
+                                      value: _isSelected(e),
+                                      onChanged: (v) =>
+                                          _toggleSelected(e, v ?? false),
+                                    ),
                                   ),
                                 ],
                               ),
@@ -494,6 +634,10 @@ class _ExplorerTabState extends State<ExplorerTab> {
                               color: isDir ? Colors.amber : Colors.blue,
                             ),
                             title: Text(e['name']),
+                            trailing: Checkbox(
+                              value: _isSelected(e),
+                              onChanged: (v) => _toggleSelected(e, v ?? false),
+                            ),
                             onTap: () {
                               final remote = widget.pathController.text == '/'
                                   ? '/${e['name']}'
@@ -561,6 +705,10 @@ class _ExplorerTabState extends State<ExplorerTab> {
                             title: Text(
                               e['name'],
                               style: const TextStyle(fontSize: 12),
+                            ),
+                            trailing: Checkbox(
+                              value: _isSelected(e),
+                              onChanged: (v) => _toggleSelected(e, v ?? false),
                             ),
                             onTap: () {
                               final remote = widget.pathController.text == '/'
@@ -643,9 +791,19 @@ class _ExplorerTabState extends State<ExplorerTab> {
                                       ? 'Directory'
                                       : '${entry['size']} bytes',
                                 ),
-                                trailing: const Icon(
-                                  Icons.chevron_right,
-                                  color: Colors.grey,
+                                trailing: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(
+                                      Icons.chevron_right,
+                                      color: Colors.grey,
+                                    ),
+                                    Checkbox(
+                                      value: _isSelected(entry),
+                                      onChanged: (v) =>
+                                          _toggleSelected(entry, v ?? false),
+                                    ),
+                                  ],
                                 ),
                                 onTap: () {
                                   final remote =
@@ -740,12 +898,12 @@ class _ExplorerTabState extends State<ExplorerTab> {
               ActionChip(
                 avatar: const Icon(Icons.drive_file_rename_outline),
                 label: const Text('Rename'),
-                onPressed: widget.onRename,
+                onPressed: () => _handleRenameSelected(entries),
               ),
               ActionChip(
                 avatar: const Icon(Icons.delete),
                 label: const Text('Delete'),
-                onPressed: widget.onDelete,
+                onPressed: () => _handleDeleteSelected(entries),
                 backgroundColor: Theme.of(context).colorScheme.errorContainer,
               ),
               ActionChip(

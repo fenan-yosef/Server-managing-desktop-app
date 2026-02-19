@@ -137,56 +137,58 @@ def _run_single_batch(job_id: str, server: dict, local_root: Path, mode: str, st
                 with _persistent_managers_lock:
                     _manager_connected.add(host_key)
 
-        job = _make_job(job_id, remote_path, str(local_root), "running", "tar", 10, "Connected", mode)
-        store.upsert(job)
-
-        remote_tmp = f"/tmp/{job_id}.tar.gz"
-        tar_cmd = f"tar -czf {remote_tmp} {remote_path}"
-        out, err, code = mgr.exec(tar_cmd)
-        if code != 0:
-            raise RuntimeError(f"Remote tar failed: {err or out}")
-
-        job = _make_job(job_id, remote_path, str(local_root), "running", "download", 30, "Downloading archive", mode)
-        store.upsert(job)
-
-        # Ensure destination subfolder per host exists and use it for the archive
-        local_root.mkdir(parents=True, exist_ok=True)
-        # sanitize host for filesystem
-        sanitized_host = host.replace('/', '_').replace('\\', '_').replace(':', '_')
-        host_dir = local_root / sanitized_host
-        host_dir.mkdir(parents=True, exist_ok=True)
-        remote_size = 0
-        sftp = mgr.open_sftp()
-        try:
-            remote_size = sftp.stat(remote_tmp).st_size
-            filename = f"{Path(remote_path).name or 'backup'}-{job_id[:8]}.tar.gz"
-            local_path = host_dir / filename
-            with sftp.open(remote_tmp, "rb") as src, local_path.open("wb") as dst:
-                transferred = 0
-                while True:
-                    chunk = src.read(1024 * 256)
-                    if not chunk:
-                        break
-                    dst.write(chunk)
-                    transferred += len(chunk)
-                    if remote_size > 0:
-                        pct = int(30 + (transferred / remote_size) * 60)
-                        job = _make_job(job_id, remote_path, str(local_root), "running", "download", pct, "Downloading archive", mode)
-                        store.upsert(job)
-            job = _make_job(job_id, remote_path, str(local_root), "running", "cleanup", 95, "Cleaning up", mode)
+        # Serialize all SSH operations on the shared manager per-host.
+        with lock:
+            job = _make_job(job_id, remote_path, str(local_root), "running", "tar", 10, "Connected", mode)
             store.upsert(job)
-        finally:
-            try:
-                mgr.exec(f"rm -f {remote_tmp}")
-            except Exception:
-                pass
-            try:
-                sftp.close()
-            except Exception:
-                pass
 
-        job = _make_job(job_id, remote_path, str(local_root), "completed", "done", 100, f"Saved to {local_path}", mode)
-        store.upsert(job)
+            remote_tmp = f"/tmp/{job_id}.tar.gz"
+            tar_cmd = f"tar -czf {remote_tmp} {remote_path}"
+            out, err, code = mgr.exec(tar_cmd)
+            if code != 0:
+                raise RuntimeError(f"Remote tar failed: {err or out}")
+
+            job = _make_job(job_id, remote_path, str(local_root), "running", "download", 30, "Downloading archive", mode)
+            store.upsert(job)
+
+            # Ensure destination subfolder per host exists and use it for the archive
+            local_root.mkdir(parents=True, exist_ok=True)
+            # sanitize host for filesystem
+            sanitized_host = host.replace('/', '_').replace('\\', '_').replace(':', '_')
+            host_dir = local_root / sanitized_host
+            host_dir.mkdir(parents=True, exist_ok=True)
+            remote_size = 0
+            sftp = mgr.open_sftp()
+            try:
+                remote_size = sftp.stat(remote_tmp).st_size
+                filename = f"{Path(remote_path).name or 'backup'}-{job_id[:8]}.tar.gz"
+                local_path = host_dir / filename
+                with sftp.open(remote_tmp, "rb") as src, local_path.open("wb") as dst:
+                    transferred = 0
+                    while True:
+                        chunk = src.read(1024 * 256)
+                        if not chunk:
+                            break
+                        dst.write(chunk)
+                        transferred += len(chunk)
+                        if remote_size > 0:
+                            pct = int(30 + (transferred / remote_size) * 60)
+                            job = _make_job(job_id, remote_path, str(local_root), "running", "download", pct, "Downloading archive", mode)
+                            store.upsert(job)
+                job = _make_job(job_id, remote_path, str(local_root), "running", "cleanup", 95, "Cleaning up", mode)
+                store.upsert(job)
+            finally:
+                try:
+                    mgr.exec(f"rm -f {remote_tmp}")
+                except Exception:
+                    pass
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+
+            job = _make_job(job_id, remote_path, str(local_root), "completed", "done", 100, f"Saved to {local_path}", mode)
+            store.upsert(job)
     except Exception as exc:  # noqa: BLE001
         fail_job = _make_job(job_id, remote_path, str(local_root), "failed", "error", 0, str(exc), mode)
         store.upsert(fail_job)
@@ -199,16 +201,17 @@ def _run_single_batch(job_id: str, server: dict, local_root: Path, mode: str, st
     finally:
         try:
             if auth_failed:
-                try:
-                    mgr.disconnect()
-                except Exception:
-                    pass
-                with _persistent_managers_lock:
+                with lock:
                     try:
-                        del _persistent_managers[host_key]
+                        mgr.disconnect()
                     except Exception:
                         pass
-                    _manager_connected.discard(host_key)
+                    with _persistent_managers_lock:
+                        try:
+                            del _persistent_managers[host_key]
+                        except Exception:
+                            pass
+                        _manager_connected.discard(host_key)
         except Exception:
             pass
         # Release per-host slot

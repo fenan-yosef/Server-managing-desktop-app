@@ -653,42 +653,56 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  Future<void> _rename() async {
-    final item = _explorerEntries.firstWhere((e) => true, orElse: () => {});
-    if (item.isNotEmpty) {
-      final newName = await showInputDialog(context, 'New Name', item['name']);
-      if (newName != null) {
-        final oldPath = '${_pathController.text}/${item['name']}';
-        final newPath = '${_pathController.text}/$newName';
-        try {
-          await _backend.sendCommand('rename', {
-            'old_path': oldPath,
-            'new_path': newPath,
-          });
-          _refreshExplorer();
-        } catch (e) {
-          // ignore
-        }
-      }
-    }
+  String _entryRemotePath(Map<String, dynamic> entry) {
+    final name = (entry['name'] ?? '').toString();
+    final base = _pathController.text.trim();
+    if (name.isEmpty) return base.isEmpty ? '/' : base;
+    if (base.isEmpty || base == '/') return '/$name';
+    return '$base/$name';
   }
 
-  Future<void> _delete() async {
-    final item = _explorerEntries.firstWhere((e) => true, orElse: () => {});
-    if (item.isNotEmpty) {
-      final confirmed = await showConfirmDialog(
-        context,
-        'Delete ${item['name']}?',
-      );
-      if (confirmed) {
-        final path = '${_pathController.text}/${item['name']}';
-        try {
-          await _backend.sendCommand('delete', {'path': path});
-          _refreshExplorer();
-        } catch (e) {
-          // ignore
-        }
+  Future<void> _rename(Map<String, dynamic> item) async {
+    if (item.isEmpty) return;
+    final currentName = (item['name'] ?? '').toString();
+    final newName = await showInputDialog(context, 'New Name', currentName);
+    if (newName == null || newName.trim().isEmpty || newName == currentName) {
+      return;
+    }
+
+    final oldPath = _entryRemotePath(item);
+    final parent = _pathController.text.trim();
+    final newPath = (parent.isEmpty || parent == '/')
+        ? '/$newName'
+        : '$parent/$newName';
+
+    await _backend.sendCommand('rename', {
+      'old_path': oldPath,
+      'new_path': newPath,
+    });
+    await _refreshExplorer();
+  }
+
+  Future<void> _delete(List<Map<String, dynamic>> items) async {
+    if (items.isEmpty) return;
+    final failures = <String>[];
+    var deletedAny = false;
+
+    for (final item in items) {
+      try {
+        final path = _entryRemotePath(item);
+        await _backend.sendCommand('delete', {'path': path});
+        deletedAny = true;
+      } catch (e) {
+        final name = (item['name'] ?? '<unknown>').toString();
+        failures.add('$name: $e');
       }
+    }
+
+    if (deletedAny) {
+      await _refreshExplorer();
+    }
+    if (failures.isNotEmpty) {
+      throw Exception(failures.join('\n'));
     }
   }
 
