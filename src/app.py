@@ -1,3 +1,31 @@
+def _sanitize_tar_output(text: str) -> str:
+    """Remove noisy tar/sysfs lines from tar output used in logs and job messages.
+    Returns an empty string if only benign lines were present.
+    """
+    if not text:
+        return ''
+    lines = []
+    for ln in str(text).splitlines():
+        l = ln.strip()
+        if not l:
+            continue
+        low = l.lower()
+        if ('file shrank' in low
+                or 'padding with zeros' in low
+                or 'read error at byte' in low
+                or 'input/output error' in low
+                or 'removing leading' in low
+                or 'permission denied' in low
+                or 'cannot open' in low
+                or low.startswith('tar: /sys')
+                or low.startswith('tar: /proc')
+                or low.startswith('tar: /dev')
+                or low.startswith('tar: /run')
+        ):
+            continue
+        lines.append(ln)
+    out = '\n'.join(lines).strip()
+    return out
 import os
 import posixpath
 import shutil
@@ -352,7 +380,11 @@ class BackupWorker(QObject):
         create_cmd = f"tar -czf {remote_tmp} {self.job.source}"
         out, err, code = self.ssh.exec(create_cmd)
         if code != 0:
-            raise RuntimeError(f"Remote tar failed: {err or out}")
+            # sanitize tar output before surfacing
+            sanitized = _sanitize_tar_output(err or out)
+            if not sanitized:
+                sanitized = f"(exit code {code})"
+            raise RuntimeError(f"Remote tar failed: {sanitized}")
         self._update_status("running", "download", 50, "Downloading archive")
         sftp = self.ssh.open_sftp()
         try:

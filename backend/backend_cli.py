@@ -46,6 +46,49 @@ _per_host_semaphores_lock = threading.Lock()
 _connect_stats = {}
 _connect_stats_lock = threading.Lock()
 
+_TAR_EXCLUDE_FLAGS = "--exclude=/sys --exclude=/proc --exclude=/dev"
+
+
+def _sanitize_tar_messages(text: str) -> str:
+    if not text:
+        return ""
+    lines = []
+    for ln in str(text).splitlines():
+        low = ln.strip().lower()
+        if not low:
+            continue
+        if low.startswith("tar: removing leading `/' from member names"):
+            continue
+        if "file shrank by" in low and (
+            low.startswith('tar: /sys')
+            or low.startswith('tar: /proc')
+            or low.startswith('tar: /dev')
+            or low.startswith('tar: /run')
+        ):
+            continue
+        lines.append(ln)
+    return "\n".join(lines).strip()
+
+
+def _build_tar_stream_cmd(remote_path: str | None) -> str:
+    rp = (remote_path or '/').strip()
+    if rp == '/' or rp == '':
+        return f"tar -czf - {_TAR_EXCLUDE_FLAGS} -C / ."
+
+    normalized = '/' + rp.lstrip('/')
+    parts = normalized.rstrip('/').rsplit('/', 1)
+    parent = parts[0] or '/'
+    name = parts[1] if len(parts) > 1 else parts[0]
+    return (
+        f"tar -czf - {_TAR_EXCLUDE_FLAGS} "
+        f"-C {shlex.quote(parent)} {shlex.quote(name)}"
+    )
+
+
+def _build_tar_file_cmd(remote_tmp: str, remote_path: str | None) -> str:
+    stream_cmd = _build_tar_stream_cmd(remote_path)
+    return stream_cmd.replace("-czf -", f"-czf {shlex.quote(remote_tmp)}", 1)
+
 
 def _make_job(job_id: str, source: str, target_root: str, status: str, phase: str, progress: int, message: str, mode: str) -> Job:
     return Job(
@@ -90,30 +133,7 @@ def _stream_remote_tar(host: str, port: int, username: str, key_path: str | None
 
         client.connect(**connect_kwargs)
 
-        # Build a safe tar command that streams to stdout. Use -C parent + basename when possible.
-        # Exclude virtual and volatile filesystems to reduce noisy tar warnings
-        _tar_excludes = [
-            '--exclude=/proc',
-            '--exclude=/sys',
-            '--exclude=/dev',
-            '--exclude=/run',
-            '--exclude=/tmp',
-            '--exclude=/var/run',
-            '--exclude=/var/lock',
-        ]
-        excl_str = ' '.join(_tar_excludes)
-        rp = remote_path or '/'
-        if rp == '/' or rp.strip() == '':
-            remote_cmd = f"tar -czf - {excl_str} -C / ."
-        else:
-            parent = '/' if rp == '/' else shlex.quote('/' + rp.lstrip('/').rsplit('/', 1)[0])
-            name = '.' if rp.rstrip('/') == '' else shlex.quote(rp.rstrip('/').rsplit('/', 1)[-1])
-            # If parent resolves to just '/', ensure command is correct
-            if parent == '/':
-                # for a top-level like /foo use -C / foo
-                remote_cmd = f"tar -czf - {excl_str} -C / {name}"
-            else:
-                remote_cmd = f"tar -czf - {excl_str} -C {parent} {name}"
+        remote_cmd = _build_tar_stream_cmd(remote_path)
 
         stdin, stdout, stderr = client.exec_command(remote_cmd)
 
@@ -127,8 +147,9 @@ def _stream_remote_tar(host: str, port: int, username: str, key_path: str | None
 
         exit_code = stdout.channel.recv_exit_status()
         if exit_code != 0:
-            err = stderr.read().decode(errors='ignore')
-            raise RuntimeError(f"remote tar failed (exit {exit_code}): {err}")
+            err = _sanitize_tar_messages(stderr.read().decode(errors='ignore'))
+            details = err or "tar exited with non-zero status"
+            raise RuntimeError(f"remote tar failed (exit {exit_code}): {details}")
 
     finally:
         try:
@@ -221,24 +242,17 @@ def _run_single_batch(job_id: str, server: dict, local_root: Path, mode: str, st
             store.upsert(job)
 
             remote_tmp = f"/tmp/{job_id}.tar.gz"
-            # reuse the same exclude set for streaming to avoid noisy output
-            _tar_excludes_remote = ' '.join(["--exclude=/proc", "--exclude=/sys", "--exclude=/dev", "--exclude=/run", "--exclude=/tmp", "--exclude=/var/run", "--exclude=/var/lock"]) 
-            tar_cmd = f"tar -czf {remote_tmp} {_tar_excludes_remote} {remote_path}"
+            tar_cmd = _build_tar_file_cmd(remote_tmp, remote_path)
             out, err, code = mgr.exec(tar_cmd)
-            # Filter a few known benign tar warnings so they don't spam logs.
-            if err and code == 0:
-                lerr = (err or '').lower()
-                _benign = ['file shrank', 'padding with zeros', 'read error at byte', 'input/output error']
-                if any(p in lerr for p in _benign):
-                    err = ''
             # If remote tar failed due to lack of remote space, attempt streaming tar over SSH.
             stream_fallback = False
             if code != 0:
-                combined = (err or '') + (out or '')
+                combined = _sanitize_tar_messages((err or '') + (out or ''))
                 if 'no space' in combined.lower() or 'no space left' in combined.lower():
                     stream_fallback = True
                 else:
-                    raise RuntimeError(f"Remote tar failed: {err or out}")
+                    details = combined or "remote tar exited with non-zero status"
+                    raise RuntimeError(f"Remote tar failed: {details}")
 
             local_archive_path = None
             if stream_fallback:
