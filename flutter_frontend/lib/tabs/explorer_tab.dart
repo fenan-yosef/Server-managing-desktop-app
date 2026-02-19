@@ -102,8 +102,12 @@ class _ExplorerTabState extends State<ExplorerTab> {
     });
   }
 
-  List<Map<String, dynamic>> _selectedEntries(List<Map<String, dynamic>> entries) {
-    return entries.where((e) => _selectedPaths.contains(_entryRemotePath(e))).toList();
+  List<Map<String, dynamic>> _selectedEntries(
+    List<Map<String, dynamic>> entries,
+  ) {
+    return entries
+        .where((e) => _selectedPaths.contains(_entryRemotePath(e)))
+        .toList();
   }
 
   Future<void> _handleRenameSelected(List<Map<String, dynamic>> entries) async {
@@ -116,15 +120,16 @@ class _ExplorerTabState extends State<ExplorerTab> {
     }
     if (selected.length > 1) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Rename supports only one selected item at a time.')),
+        const SnackBar(
+          content: Text('Rename supports only one selected item at a time.'),
+        ),
       );
       return;
     }
     try {
       await widget.onRename(selected.first);
       setState(() {
-        _selectedPaths
-          ..clear();
+        _selectedPaths..clear();
       });
     } catch (e) {
       ScaffoldMessenger.of(
@@ -137,7 +142,9 @@ class _ExplorerTabState extends State<ExplorerTab> {
     final selected = _selectedEntries(entries);
     if (selected.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Select one or more files/folders to delete.')),
+        const SnackBar(
+          content: Text('Select one or more files/folders to delete.'),
+        ),
       );
       return;
     }
@@ -164,7 +171,9 @@ class _ExplorerTabState extends State<ExplorerTab> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: names
-                        .map((n) => Text('• $n', overflow: TextOverflow.ellipsis))
+                        .map(
+                          (n) => Text('• $n', overflow: TextOverflow.ellipsis),
+                        )
                         .toList(),
                   ),
                 ),
@@ -585,7 +594,8 @@ class _ExplorerTabState extends State<ExplorerTab> {
                                 children: [
                                   Center(
                                     child: Column(
-                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.center,
                                       children: [
                                         Icon(
                                           isDir
