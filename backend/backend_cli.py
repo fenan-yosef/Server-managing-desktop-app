@@ -17,6 +17,8 @@ import uuid
 import time
 from datetime import datetime
 from pathlib import Path
+import shlex
+import paramiko
 
 sys.path.append('src')
 from app import SSHManager, JobStore, ExplorerModel, Job
@@ -57,6 +59,82 @@ def _make_job(job_id: str, source: str, target_root: str, status: str, phase: st
         message=message,
         mode=mode,
     )
+
+
+def _stream_remote_tar(host: str, port: int, username: str, key_path: str | None, password: str | None, remote_path: str, local_path: str, timeout: int = 60) -> None:
+    """
+    Connects to the remote host using Paramiko and runs a tar->gzip streaming command
+    that writes the archive to stdout. The stdout is streamed and written directly to
+    `local_path` to avoid creating temporary files on the remote host.
+
+    This is used as a fallback when the remote host has insufficient /tmp space.
+    """
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        # connect using provided credentials
+        connect_kwargs = {
+            'hostname': host,
+            'port': port,
+            'username': username,
+            'timeout': max(10, timeout),
+        }
+        if key_path:
+            try:
+                connect_kwargs['pkey'] = paramiko.RSAKey.from_private_key_file(key_path)
+            except Exception:
+                # fallback to letting connect handle key file or agent
+                connect_kwargs['key_filename'] = key_path
+        if password:
+            connect_kwargs['password'] = password
+
+        client.connect(**connect_kwargs)
+
+        # Build a safe tar command that streams to stdout. Use -C parent + basename when possible.
+        # Exclude virtual and volatile filesystems to reduce noisy tar warnings
+        _tar_excludes = [
+            '--exclude=/proc',
+            '--exclude=/sys',
+            '--exclude=/dev',
+            '--exclude=/run',
+            '--exclude=/tmp',
+            '--exclude=/var/run',
+            '--exclude=/var/lock',
+        ]
+        excl_str = ' '.join(_tar_excludes)
+        rp = remote_path or '/'
+        if rp == '/' or rp.strip() == '':
+            remote_cmd = f"tar -czf - {excl_str} -C / ."
+        else:
+            parent = '/' if rp == '/' else shlex.quote('/' + rp.lstrip('/').rsplit('/', 1)[0])
+            name = '.' if rp.rstrip('/') == '' else shlex.quote(rp.rstrip('/').rsplit('/', 1)[-1])
+            # If parent resolves to just '/', ensure command is correct
+            if parent == '/':
+                # for a top-level like /foo use -C / foo
+                remote_cmd = f"tar -czf - {excl_str} -C / {name}"
+            else:
+                remote_cmd = f"tar -czf - {excl_str} -C {parent} {name}"
+
+        stdin, stdout, stderr = client.exec_command(remote_cmd)
+
+        # Write stdout stream to local file in binary mode
+        with open(local_path, 'wb') as lf:
+            while True:
+                chunk = stdout.channel.recv(32768)
+                if not chunk:
+                    break
+                lf.write(chunk)
+
+        exit_code = stdout.channel.recv_exit_status()
+        if exit_code != 0:
+            err = stderr.read().decode(errors='ignore')
+            raise RuntimeError(f"remote tar failed (exit {exit_code}): {err}")
+
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
 
 
 def _run_single_batch(job_id: str, server: dict, local_root: Path, mode: str, store: JobStore, per_host_limit: int = 1) -> str:
@@ -143,10 +221,36 @@ def _run_single_batch(job_id: str, server: dict, local_root: Path, mode: str, st
             store.upsert(job)
 
             remote_tmp = f"/tmp/{job_id}.tar.gz"
-            tar_cmd = f"tar -czf {remote_tmp} {remote_path}"
+            # reuse the same exclude set for streaming to avoid noisy output
+            _tar_excludes_remote = ' '.join(["--exclude=/proc", "--exclude=/sys", "--exclude=/dev", "--exclude=/run", "--exclude=/tmp", "--exclude=/var/run", "--exclude=/var/lock"]) 
+            tar_cmd = f"tar -czf {remote_tmp} {_tar_excludes_remote} {remote_path}"
             out, err, code = mgr.exec(tar_cmd)
+            # Filter a few known benign tar warnings so they don't spam logs.
+            if err and code == 0:
+                lerr = (err or '').lower()
+                _benign = ['file shrank', 'padding with zeros', 'read error at byte', 'input/output error']
+                if any(p in lerr for p in _benign):
+                    err = ''
+            # If remote tar failed due to lack of remote space, attempt streaming tar over SSH.
+            stream_fallback = False
             if code != 0:
-                raise RuntimeError(f"Remote tar failed: {err or out}")
+                combined = (err or '') + (out or '')
+                if 'no space' in combined.lower() or 'no space left' in combined.lower():
+                    stream_fallback = True
+                else:
+                    raise RuntimeError(f"Remote tar failed: {err or out}")
+
+            local_archive_path = None
+            if stream_fallback:
+                # ensure destination directory exists
+                sanitized_host = host.replace('/', '_').replace('\\', '_').replace(':', '_')
+                host_dir = local_root / sanitized_host
+                host_dir.mkdir(parents=True, exist_ok=True)
+                local_archive_path = host_dir / f"{job_id}.tar.gz"
+                try:
+                    _stream_remote_tar(host, port, username, key_path, password, remote_path, str(local_archive_path))
+                except Exception as e:
+                    raise RuntimeError(f"Remote tar failed and streaming fallback failed: {e}") from e
 
             job = _make_job(job_id, remote_path, str(local_root), "running", "download", 30, "Downloading archive", mode)
             store.upsert(job)
@@ -160,33 +264,32 @@ def _run_single_batch(job_id: str, server: dict, local_root: Path, mode: str, st
             remote_size = 0
             sftp = mgr.open_sftp()
             try:
-                remote_size = sftp.stat(remote_tmp).st_size
-                filename = f"{Path(remote_path).name or 'backup'}-{job_id[:8]}.tar.gz"
-                local_path = host_dir / filename
-                with sftp.open(remote_tmp, "rb") as src, local_path.open("wb") as dst:
-                    transferred = 0
-                    while True:
-                        chunk = src.read(1024 * 256)
-                        if not chunk:
-                            break
-                        dst.write(chunk)
-                        transferred += len(chunk)
-                        if remote_size > 0:
-                            pct = int(30 + (transferred / remote_size) * 60)
-                            job = _make_job(job_id, remote_path, str(local_root), "running", "download", pct, "Downloading archive", mode)
-                            store.upsert(job)
-                job = _make_job(job_id, remote_path, str(local_root), "running", "cleanup", 95, "Cleaning up", mode)
-                store.upsert(job)
+                if local_archive_path is not None:
+                    # streaming fallback already wrote the archive locally
+                    remote_size = int(local_archive_path.stat().st_size)
+                    dest_path = local_archive_path
+                else:
+                    remote_size = sftp.stat(remote_tmp).st_size
+                    # Ensure destination subfolder per host exists and use it for the archive
+                    dest_path = host_dir / f"{job_id}.tar.gz"
+                    sftp.get(remote_tmp, str(dest_path))
+                # Ensure cleanup of remote temp file only if we created it remotely
             finally:
                 try:
-                    mgr.exec(f"rm -f {remote_tmp}")
-                except Exception:
-                    pass
-                try:
-                    sftp.close()
-                except Exception:
-                    pass
+                    if local_archive_path is None:
+                        # Clean up remote temp file only if we created it remotely
+                        try:
+                            sftp.remove(remote_tmp)
+                        except Exception:
+                            pass
+                finally:
+                    try:
+                        sftp.close()
+                    except Exception:
+                        pass
 
+            # record where we saved the archive locally for the job message
+            local_path = str(dest_path)
             job = _make_job(job_id, remote_path, str(local_root), "completed", "done", 100, f"Saved to {local_path}", mode)
             store.upsert(job)
     except Exception as exc:  # noqa: BLE001
